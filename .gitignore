@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+.pytest_cache/
+.mypy_cache/
+.DS_Store
+*.log
+/tmp/
+# compiled OCR helper (rebuild with app.engine.ocr.ensure_ocr_binary)
+bin/ocr_vision
+bin/*.swift
+# large raw photos (keep smaller samples)
+data/samples/target_names.png
+*.heic
+.idea/
+.vscode/
