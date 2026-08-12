@@ -75,6 +75,15 @@ def test_index_has_only_two_image_or_pdf_upload_choices():
     assert "<select" not in html
 
 
+def test_public_ui_uses_pollable_background_ocr_endpoints():
+    """Long Render OCR must not depend on one multi-minute HTTP request."""
+    script = client.get("/static/app.js").text
+    assert "/api/upload/master/multi/start" in script
+    assert "/api/upload/targets/multi/start" in script
+    assert "/progress" in script
+    assert "waitForPhase" in script
+
+
 def test_capabilities():
     r = client.get("/api/capabilities")
     assert r.status_code == 200

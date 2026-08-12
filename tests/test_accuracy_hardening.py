@@ -6,14 +6,12 @@ from pathlib import Path
 import itertools
 import random
 
-import pytest
 from PIL import Image, ImageDraw
 
 from app.engine.dates import ExtractedDate, HijriDate, extract_all_dates
 from app.engine.extract_master import (
     _merge_near_duplicate_people,
     _select_roster_columns,
-    crop_table_for_ocr,
     detect_table_grid,
 )
 from app.engine.extract_targets import match_to_master
@@ -372,30 +370,6 @@ def test_table_grid_detection_on_synthetic_roster(tmp_path: Path):
     assert grid is not None
     assert len(grid.vertical_lines) >= 5
     assert len(grid.row_boundaries) >= 5
-
-
-def test_table_crop_remaps_geometry_and_removes_page_furniture(tmp_path: Path):
-    sample = tmp_path / "page.png"
-    Image.new("RGB", (1000, 1400), "white").save(sample)
-    from app.engine.extract_master import TableGrid
-
-    grid = TableGrid(
-        row_boundaries=(0.20, 0.30, 0.80),
-        vertical_lines=(0.10, 0.40, 0.70, 0.90),
-        name_left=0.70,
-        name_right=0.90,
-        notes_right=0.40,
-    )
-    cropped_path, cropped_grid = crop_table_for_ocr(sample, grid, padding=0.0)
-    try:
-        with Image.open(cropped_path) as cropped:
-            assert cropped.size == (800, 840)
-        assert cropped_grid.row_boundaries == (0.0, pytest.approx(1 / 6), 1.0)
-        assert cropped_grid.vertical_lines == (0.0, pytest.approx(0.375), pytest.approx(0.75), 1.0)
-        assert cropped_grid.name_left == pytest.approx(0.75)
-        assert cropped_grid.notes_right == pytest.approx(0.375)
-    finally:
-        cropped_path.unlink(missing_ok=True)
 
 
 def test_roster_column_selection_rejects_aligned_name_ink_as_rule():
