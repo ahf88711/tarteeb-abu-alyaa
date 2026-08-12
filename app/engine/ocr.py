@@ -25,6 +25,34 @@ EVIDENCE_ROOT = Path(tempfile.gettempdir()) / "tarteeb_abu_alyaa_evidence"
 EVIDENCE_ROOT.mkdir(parents=True, exist_ok=True)
 
 
+def ocr_max_side() -> int:
+    """Bound OCR rasters for the active runtime without weakening consensus.
+
+    Render's free CPU cannot finish three Tesseract passes on 3400–3600 px
+    pages within the per-pass safety timeout. 2400 px keeps a photographed A4
+    page legible while reducing its pixel count by roughly half. Deployments
+    with more CPU can override the value through ``OCR_MAX_SIDE``.
+    """
+    render_runtime = bool(os.getenv("RENDER_EXTERNAL_URL") or os.getenv("RENDER"))
+    default = 2400 if render_runtime else 3600
+    try:
+        configured = int(os.getenv("OCR_MAX_SIDE", str(default)))
+    except ValueError:
+        configured = default
+    return max(1800, min(4200, configured))
+
+
+def ocr_timeout_seconds() -> int:
+    """Per-pass OCR timeout, extended on resource-constrained Render CPUs."""
+    render_runtime = bool(os.getenv("RENDER_EXTERNAL_URL") or os.getenv("RENDER"))
+    default = 300 if render_runtime else 180
+    try:
+        configured = int(os.getenv("OCR_TIMEOUT_SECONDS", str(default)))
+    except ValueError:
+        configured = default
+    return max(60, min(600, configured))
+
+
 @dataclass
 class OcrToken:
     text: str
@@ -188,8 +216,9 @@ def orient_document_image(path: Path) -> Path:
     return destination
 
 
-def _resize_for_ocr(image: Image.Image, max_side: int = 3600) -> Image.Image:
+def _resize_for_ocr(image: Image.Image, max_side: Optional[int] = None) -> Image.Image:
     image = ImageOps.exif_transpose(image)
+    max_side = max_side or ocr_max_side()
     width, height = image.size
     scale = min(1.0, max_side / max(width, height))
     if scale < 1.0:
@@ -229,7 +258,7 @@ def _vision_ocr(path: Path, *, source: str) -> list[OcrToken]:
         [str(binary), str(path)],
         capture_output=True,
         text=True,
-        timeout=180,
+        timeout=ocr_timeout_seconds(),
     )
     if proc.returncode != 0:
         raise RuntimeError(f"فشل Apple Vision OCR: {proc.stderr[:600]}")
@@ -276,7 +305,7 @@ def _tesseract_ocr(path: Path, *, source: str, psm: int = 6) -> list[OcrToken]:
         ],
         capture_output=True,
         text=True,
-        timeout=180,
+        timeout=ocr_timeout_seconds(),
     )
     if proc.returncode != 0:
         raise RuntimeError(f"فشل Tesseract OCR: {proc.stderr[:600]}")

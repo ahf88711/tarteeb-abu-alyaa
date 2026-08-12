@@ -15,7 +15,7 @@ from PIL import Image, ImageOps
 from .dates import extract_all_dates
 from .models import MasterPerson, make_master_key
 from .normalize import normalize_arabic_name
-from .ocr import OcrToken, ocr_consensus, save_region_crop
+from .ocr import OcrToken, ocr_consensus, ocr_max_side, save_region_crop
 
 _RANK_EXACT = {
     "عريف", "جندي", "جندى", "جندي اول", "جندي أول", "جندى اول", "جندى أول",
@@ -36,7 +36,7 @@ def render_pdf_pages(pdf_path: Path, scale: float = 3.0) -> list[Path]:
         for i in range(len(pdf)):
             page = pdf[i]
             width, height = page.get_size()
-            adaptive_scale = max(1.0, min(4.0, 3400.0 / max(width, height)))
+            adaptive_scale = max(1.0, min(4.0, ocr_max_side() / max(width, height)))
             pil = page.render(scale=adaptive_scale).to_pil()
             out = Path(tempfile.mkstemp(prefix=f"master_p{i+1}_", suffix=".png")[1])
             pil.convert("RGB").save(out, "PNG")

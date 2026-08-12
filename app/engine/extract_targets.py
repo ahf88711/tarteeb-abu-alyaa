@@ -17,6 +17,7 @@ from .ocr import (
     highlight_score,
     load_image_any,
     ocr_consensus,
+    ocr_max_side,
     orient_document_image,
     save_region_crop,
 )
@@ -205,7 +206,7 @@ def _render_target_pdf(path: Path) -> list[Path]:
         for index in range(len(document)):
             page = document[index]
             width, height = page.get_size()
-            scale = max(1.0, min(4.0, 3200.0 / max(width, height)))
+            scale = max(1.0, min(4.0, ocr_max_side() / max(width, height)))
             image = page.render(scale=scale).to_pil().convert("RGB")
             destination = Path(tempfile.mkstemp(prefix=f"targets_{index + 1}_", suffix=".png")[1])
             image.save(destination, "PNG")
