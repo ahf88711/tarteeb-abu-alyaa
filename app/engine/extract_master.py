@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,9 +13,15 @@ import numpy as np
 import pypdfium2 as pdfium
 from PIL import Image, ImageOps
 
-from .dates import extract_all_dates
+from .dates import extract_all_dates, parse_hijri_date
+from .hybrid_ocr import (
+    HybridRowInput,
+    evidence_url_to_path,
+    hybrid_ocr_model,
+    verify_arabic_rows,
+)
 from .models import MasterPerson, make_master_key
-from .normalize import normalize_arabic_name
+from .normalize import name_similarity, normalize_arabic_name
 from .ocr import OcrToken, ocr_consensus, ocr_max_side, save_region_crop
 
 _RANK_EXACT = {
@@ -412,6 +419,110 @@ def parse_page_tokens(
     return rows_out
 
 
+def _hybrid_master_limit() -> int:
+    try:
+        configured = int(os.getenv("OPENAI_OCR_MAX_MASTER_ROWS_PER_PAGE", "80"))
+    except ValueError:
+        configured = 80
+    return max(1, min(200, configured))
+
+
+def _normalized_ai_dates(values: tuple[str, ...]) -> set[str]:
+    normalized: set[str] = set()
+    for value in values:
+        parsed = parse_hijri_date(value)
+        if parsed is not None:
+            normalized.add(parsed.iso())
+    return normalized
+
+
+def apply_hybrid_master_verification(rows: list[dict]) -> None:
+    """Raise confidence only when the row crop repeats the local name/dates.
+
+    Missing or different remote values are useful review evidence, but are not
+    injected into the master record. This keeps a single model reading from
+    inventing a person or silently changing a date.
+    """
+    inputs: list[HybridRowInput] = []
+    by_id: dict[str, dict] = {}
+    for row in rows[: _hybrid_master_limit()]:
+        crop = evidence_url_to_path(str(row.get("source_image") or ""))
+        local_name = str(row.get("original_name") or "").strip()
+        if crop is None or not local_name:
+            continue
+        local_dates = tuple(
+            date.normalized.display()
+            for date in extract_all_dates(
+                str(row.get("notes") or ""),
+                confidence=float(row.get("confidence") or 0.0),
+                row_association_confidence=float(
+                    row.get("row_association_confidence") or 0.0
+                ),
+            )
+        )
+        row_id = f"m{row.get('page', 0)}r{row.get('row_index', 0)}"
+        inputs.append(
+            HybridRowInput(
+                row_id=row_id,
+                image_path=crop,
+                candidates=(local_name,),
+                local_name=local_name,
+                local_dates=local_dates,
+            )
+        )
+        by_id[row_id] = row
+
+    report = verify_arabic_rows(inputs)
+    for row_id, reading in report.readings.items():
+        row = by_id.get(row_id)
+        if row is None:
+            continue
+        local_name = str(row.get("original_name") or "")
+        name_agreed = bool(
+            reading.legible
+            and reading.confidence >= 0.95
+            and reading.selected_candidate == local_name
+            and (
+                make_master_key(reading.transcription) == make_master_key(local_name)
+                or name_similarity(reading.transcription, local_name) >= 0.95
+            )
+        )
+        local_dates = {
+            date.normalized.iso()
+            for date in extract_all_dates(
+                str(row.get("notes") or ""),
+                confidence=float(row.get("confidence") or 0.0),
+                row_association_confidence=float(
+                    row.get("row_association_confidence") or 0.0
+                ),
+            )
+        }
+        remote_dates = _normalized_ai_dates(reading.dates)
+        dates_agreed = bool(local_dates and local_dates == remote_dates)
+        decision = "confirmed" if name_agreed and (dates_agreed or not local_dates) else "disagreement"
+        if not reading.legible:
+            decision = "unreadable"
+        source_bbox = dict(row.get("source_bbox") or {})
+        source_bbox["hybrid_verification"] = {
+            "model": hybrid_ocr_model(),
+            "decision": decision,
+            "confidence": round(reading.confidence, 4),
+            "transcription": reading.transcription,
+            "selected_candidate": reading.selected_candidate,
+            "local_dates": sorted(local_dates),
+            "remote_dates": sorted(remote_dates),
+        }
+        row["source_bbox"] = source_bbox
+        if not name_agreed:
+            continue
+        row["name_confidence"] = max(
+            float(row.get("name_confidence") or 0.0), 0.96
+        )
+        if dates_agreed:
+            row["confidence"] = max(float(row.get("confidence") or 0.0), 0.96)
+            row["ocr_agreement"] = max(int(row.get("ocr_agreement") or 1), 2)
+
+
 def extract_master_pdf(pdf_path: Path) -> dict[str, MasterPerson]:
     """Process the ENTIRE master PDF; merge all occurrences per person."""
     page_images = render_pdf_pages(pdf_path)
@@ -434,6 +545,7 @@ def extract_master_pdf(pdf_path: Path) -> dict[str, MasterPerson]:
                 grid=grid,
                 image_path=img_path,
             )
+            apply_hybrid_master_verification(rows)
 
             for row in rows:
                 key = make_master_key(row["original_name"])

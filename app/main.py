@@ -207,6 +207,7 @@ def health():
 def capabilities():
     """Describe what this deployment supports (for UI / ops)."""
     ocr_bin = PROJECT_ROOT / "bin" / "ocr_vision"
+    from app.engine.hybrid_ocr import hybrid_ocr_capabilities
     from app.engine.ocr import available_ocr_backends
 
     ocr_backends = available_ocr_backends()
@@ -220,6 +221,7 @@ def capabilities():
             "master_folder",
             "master_images_as_pages",
             "target_image_ocr",
+            "hybrid_low_confidence_verification",
             "target_excel",
             "target_manual",
             "auto_confirm_cautious",
@@ -239,6 +241,7 @@ def capabilities():
         "ocr_binary_present": ocr_bin.exists(),
         "ocr_backends": ocr_backends,
         "arabic_ocr_available": bool(ocr_backends),
+        "hybrid_ocr": hybrid_ocr_capabilities(),
         "samples": {
             "master_pdf": (SAMPLES / "master_sample.pdf").exists(),
             "master_excel": (SAMPLES / "master_page3_clean.xlsx").exists(),
@@ -306,7 +309,7 @@ def start_master_upload(
     s.summary = {
         **s.summary,
         "progress_pct": 1,
-        "progress_message": "تم استلام القائمة الأولى وبدأ OCR المحلي.",
+        "progress_message": "تم استلام القائمة الأولى وبدأ OCR المحلي مع التدقيق الهجين عند الحاجة.",
     }
     background_tasks.add_task(_run_master_upload_job, s, paths)
     return {"session_id": session_id, "phase": s.phase, "files": len(paths)}
@@ -360,7 +363,7 @@ def start_targets_upload(
     s.summary = {
         **s.summary,
         "progress_pct": 1,
-        "progress_message": "تم استلام القائمة الثانية وبدأ OCR المحلي.",
+        "progress_message": "تم استلام القائمة الثانية وبدأ OCR المحلي مع التدقيق الهجين عند الحاجة.",
     }
     background_tasks.add_task(_run_targets_upload_job, s, paths)
     return {"session_id": session_id, "phase": s.phase, "files": len(paths)}

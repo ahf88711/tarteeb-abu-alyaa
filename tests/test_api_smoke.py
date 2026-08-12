@@ -91,6 +91,9 @@ def test_capabilities():
     assert body["name"] == "ترتيب أبو علياء"
     assert "deterministic_ranking" in body["features"]
     assert "demo_full_rank" in body["features"]
+    assert "hybrid_low_confidence_verification" in body["features"]
+    assert body["hybrid_ocr"]["model"] == "gpt-5.6-terra"
+    assert "api_key" not in body["hybrid_ocr"]
 
 
 def test_health_stays_responsive_during_blocking_ocr_upload(monkeypatch):

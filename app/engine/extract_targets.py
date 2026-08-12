@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import os
 import tempfile
 import uuid
 from pathlib import Path
@@ -12,6 +13,12 @@ import pypdfium2 as pdfium
 
 from .models import MasterPerson, NameStatus, TargetName, make_master_key
 from .normalize import name_similarity, normalize_arabic_name
+from .hybrid_ocr import (
+    HybridRowInput,
+    evidence_url_to_path,
+    hybrid_ocr_model,
+    verify_arabic_rows,
+)
 from .ocr import (
     OcrToken,
     highlight_score,
@@ -199,6 +206,123 @@ def match_to_master(
     return NameStatus.NOT_IN_MASTER, best_score, candidates, None
 
 
+def _hybrid_target_limit() -> int:
+    try:
+        configured = int(os.getenv("OPENAI_OCR_MAX_TARGET_ROWS", "60"))
+    except ValueError:
+        configured = 60
+    return max(1, min(200, configured))
+
+
+def _candidate_gap(target: TargetName) -> float:
+    candidates = target.candidates or []
+    if len(candidates) < 2:
+        return 1.0 if candidates else 0.0
+    return float(candidates[0].get("confidence") or 0.0) - float(
+        candidates[1].get("confidence") or 0.0
+    )
+
+
+def apply_hybrid_target_verification(targets: list[TargetName]) -> None:
+    """Confirm uncertain target identities only when local and remote evidence agree.
+
+    The model is never allowed to invent an identity: it can select only an
+    exact master candidate already proposed by the deterministic matcher. A
+    disagreement is retained in audit metadata and remains human-review work.
+    """
+    inputs: list[HybridRowInput] = []
+    by_id: dict[str, TargetName] = {}
+    for target in targets:
+        if len(inputs) >= _hybrid_target_limit():
+            break
+        crop = evidence_url_to_path(target.crop_path or "")
+        candidate_names = tuple(
+            str(candidate.get("name") or "").strip()
+            for candidate in (target.candidates or [])[:7]
+            if str(candidate.get("name") or "").strip()
+        )
+        if crop is None or not candidate_names:
+            continue
+        # Exact, high-consensus readings need no paid verifier call.
+        bbox = target.bbox or {}
+        if (
+            target.status == NameStatus.VERIFIED
+            and float(bbox.get("visual_confidence") or 0.0) >= 0.90
+            and int(bbox.get("ocr_agreement") or 0) >= 2
+        ):
+            continue
+        inputs.append(
+            HybridRowInput(
+                row_id=target.id,
+                image_path=crop,
+                candidates=candidate_names,
+                local_name=target.original_name,
+            )
+        )
+        by_id[target.id] = target
+
+    report = verify_arabic_rows(inputs)
+    for row_id, reading in report.readings.items():
+        target = by_id.get(row_id)
+        if target is None:
+            continue
+        bbox = target.bbox or {}
+        target.bbox = bbox
+        local_proposal = target.matched_master_name or ""
+        selected = reading.selected_candidate
+        selected_score = next(
+            (
+                float(candidate.get("confidence") or 0.0)
+                for candidate in target.candidates
+                if candidate.get("name") == selected
+            ),
+            0.0,
+        )
+        independent_similarity = (
+            name_similarity(reading.transcription, selected) if selected else 0.0
+        )
+        local_similarity = name_similarity(target.original_name, selected) if selected else 0.0
+        exact_independent_reading = bool(
+            selected and make_master_key(reading.transcription) == make_master_key(selected)
+        )
+        agreed = bool(
+            reading.legible
+            and reading.confidence >= 0.95
+            and selected
+            and selected == local_proposal
+            and target.status != NameStatus.AMBIGUOUS
+            and selected_score >= 0.78
+            and _candidate_gap(target) >= 0.10
+            and local_similarity >= 0.80
+            and (exact_independent_reading or independent_similarity >= 0.95)
+        )
+        decision = "confirmed" if agreed else "disagreement"
+        if not reading.legible:
+            decision = "unreadable"
+        bbox["hybrid_verification"] = {
+            "model": hybrid_ocr_model(),
+            "decision": decision,
+            "confidence": round(reading.confidence, 4),
+            "transcription": reading.transcription,
+            "selected_candidate": selected,
+            "local_proposal": local_proposal,
+        }
+        if not agreed:
+            continue
+        target.status = NameStatus.VERIFIED
+        target.matched_master_name = selected
+        target.normalized_name = make_master_key(selected)
+        target.confidence = round(
+            min(
+                0.995,
+                0.38 * max(target.confidence, local_similarity)
+                + 0.32 * selected_score
+                + 0.30 * reading.confidence,
+            ),
+            4,
+        )
+
+
 def _render_target_pdf(path: Path) -> list[Path]:
     document = pdfium.PdfDocument(str(path))
     images: list[Path] = []
@@ -283,6 +407,7 @@ def _extract_page(
                     },
                 )
             )
+        apply_hybrid_target_verification(results)
         return results
     finally:
         if remove_oriented:

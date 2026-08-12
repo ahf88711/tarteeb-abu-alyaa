@@ -8,3 +8,14 @@ services:
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /api/health
+    envVars:
+      - key: HYBRID_OCR_ENABLED
+        value: "1"
+      - key: OPENAI_OCR_MODEL
+        value: gpt-5.6-terra
+      - key: OPENAI_OCR_TIMEOUT_SECONDS
+        value: "90"
+      - key: OPENAI_OCR_BATCH_SIZE
+        value: "6"
+      - key: OPENAI_API_KEY
+        sync: false

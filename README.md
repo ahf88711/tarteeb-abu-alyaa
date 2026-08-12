@@ -10,7 +10,9 @@
 
 ```
 المستندات
-  → محرك الاستخراج والتحقق (OCR / جداول / مطابقة أسماء)
+  → Tesseract/Apple Vision محلي (الاستخراج الأساسي)
+  → OpenAI Vision اختياري (تدقيق قصاصات الصفوف منخفضة الثقة فقط)
+  → إجماع محافظ / جداول / مطابقة أسماء
   → بيانات منظمة موثقة
   → محرك الترتيب الحتمي (كود فقط — بلا LLM)
   → النتائج + شرح + تصدير
@@ -33,6 +35,7 @@
 - تُكتشف حدود الجدول هندسيًا، ويجب أن يكون الاسم والتاريخ داخل الصف نفسه.
 - لا تُدمج هويتان متقاربتان تلقائيًا؛ تظهران للمراجعة.
 - لا يُعتمد تاريخ OCR تلقائيًا إلا عند اتفاق قراءتين على الأقل، وثقة عالية، وارتباط هندسي مؤكد بالصف.
+- تدقيق OpenAI لا ينشئ أسماء أو تواريخ منفردًا: لا يرفع الثقة إلا إذا وافق القراءة المحلية واسمًا موجودًا في القائمة الأولى؛ الاختلاف يبقى للمراجعة.
 - تُعرض قصاصات المصدر للأسماء والتواريخ للمراجعة والتدقيق.
 
 ## التشغيل
@@ -42,6 +45,11 @@ cd tarteeb-abu-alyaa
 python3 -m pip install -r requirements.txt
 # macOS: يحتاج أدوات سطر أوامر Xcode لـ swiftc (OCR عبر Vision)
 # Linux/Docker: يستخدم Tesseract مع حزمة اللغة العربية ara
+
+# اختياري: يفعّل تدقيق الحالات منخفضة الثقة عبر OpenAI Responses API
+export OPENAI_API_KEY="..."
+export HYBRID_OCR_ENABLED=1
+export OPENAI_OCR_MODEL=gpt-5.6-terra
 
 # واجهة ويب
 make serve
@@ -97,8 +105,11 @@ python3 -m pytest tests/ -v
 
 ## Render وDocker
 
-يعمل OCR في Render محليًا بالكامل عبر Tesseract، دون OpenAI API أو أي خدمة OCR
-خارجية. صورة Docker المبنية على Debian Bookworm تثبّت صراحةً:
+يعمل الاستخراج الأساسي في Render محليًا عبر Tesseract. وعند ضبط السر
+`OPENAI_API_KEY` يستخدم النظام OpenAI فقط لتدقيق قصاصات الصفوف منخفضة الثقة؛
+ويبقى المسار المحلي متاحًا تلقائيًا إذا غاب المفتاح أو فشل الاتصال. لا يُرسل
+المستند كاملًا، ولا تُخزن الاستجابة (`store: false`)، ولا يدخل النموذج في خوارزمية
+الترتيب الحتمية. صورة Docker المبنية على Debian Bookworm تثبّت صراحةً:
 
 - `tesseract-ocr` مع اللغتين `ara` و`eng`.
 - `libheif1` و`pillow-heif` لصور HEIC القادمة من iPhone.
@@ -110,11 +121,21 @@ OCR أو اختبار يُفشل البناء قبل النشر. كما يشغّ
 `/api/health` و`/api/capabilities`، ثم يبدأ Render النشر بعد نجاح فحوص CI وفق
 `autoDeployTrigger: checksPass` في `render.yaml`.
 
+يعرّف `render.yaml` المفتاح بصفته سرًا `sync: false`، لذلك لا يوضع المفتاح في
+GitHub أو Dockerfile. متغيرات الضبط الاختيارية:
+
+- `OPENAI_OCR_MODEL` (الافتراضي `gpt-5.6-terra`).
+- `OPENAI_OCR_TIMEOUT_SECONDS` (الافتراضي 90 ثانية).
+- `OPENAI_OCR_BATCH_SIZE` (الافتراضي 6 قصاصات في الطلب).
+- `HYBRID_OCR_ENABLED=0` لتعطيل المدقق مع إبقاء Tesseract يعمل.
+
 للتشغيل يدويًا:
 
 ```bash
 docker build -t tarteeb-abu-alyaa .
 docker run --rm -p 8765:8765 -e PORT=8765 tarteeb-abu-alyaa
+# أو مع التدقيق الهجين (لا تكتب المفتاح في الصورة):
+docker run --rm -p 8765:8765 -e PORT=8765 -e OPENAI_API_KEY tarteeb-abu-alyaa
 ```
 
 ## هيكل المشروع
@@ -126,6 +147,7 @@ app/
     dates.py        # تواريخ هجرية
     normalize.py    # تطبيع أسماء
     extract_*.py    # استخراج
+    hybrid_ocr.py   # تدقيق اختياري للصفوف منخفضة الثقة
     pipeline.py     # مسار العمل
   static/           # واجهة عربية
   main.py           # FastAPI
