@@ -56,6 +56,8 @@ def test_index_has_only_two_image_or_pdf_upload_choices():
     assert "قائمة الأسماء والتواريخ" in html
     assert "قائمة الأسماء المراد ترتيبهم فقط" in html
     assert "نتيجة ترتيب أسماء القائمة الثانية" in html
+    assert "/static/app.js?v=" in html
+    assert "/static/styles.css?v=" in html
     for field in file_inputs:
         assert ".pdf" in field
         assert "image/*" in field
