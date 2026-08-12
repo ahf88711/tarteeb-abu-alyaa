@@ -6,12 +6,14 @@ from pathlib import Path
 import itertools
 import random
 
+import pytest
 from PIL import Image, ImageDraw
 
 from app.engine.dates import ExtractedDate, HijriDate, extract_all_dates
 from app.engine.extract_master import (
     _merge_near_duplicate_people,
     _select_roster_columns,
+    crop_table_for_ocr,
     detect_table_grid,
 )
 from app.engine.extract_targets import match_to_master
@@ -23,6 +25,7 @@ from app.engine.ocr import (
     ocr_max_side,
     ocr_timeout_seconds,
     orient_document_image,
+    tesseract_environment,
 )
 from app.engine.ranking import RankPerson, RankStatus, compare_two, rank_people
 from app.engine.pipeline import new_session, run_ranking
@@ -49,6 +52,15 @@ def test_render_ocr_limits_keep_consensus_practical(monkeypatch):
     monkeypatch.setenv("OCR_TIMEOUT_SECONDS", "420")
     assert ocr_max_side() == 2700
     assert ocr_timeout_seconds() == 420
+
+
+def test_render_limits_tesseract_threads(monkeypatch):
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.delenv("OMP_THREAD_LIMIT", raising=False)
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    environment = tesseract_environment()
+    assert environment["OMP_THREAD_LIMIT"] == "1"
+    assert environment["OMP_NUM_THREADS"] == "1"
 
 
 def test_partial_order_keeps_strict_information_inside_unresolved_component():
@@ -360,6 +372,30 @@ def test_table_grid_detection_on_synthetic_roster(tmp_path: Path):
     assert grid is not None
     assert len(grid.vertical_lines) >= 5
     assert len(grid.row_boundaries) >= 5
+
+
+def test_table_crop_remaps_geometry_and_removes_page_furniture(tmp_path: Path):
+    sample = tmp_path / "page.png"
+    Image.new("RGB", (1000, 1400), "white").save(sample)
+    from app.engine.extract_master import TableGrid
+
+    grid = TableGrid(
+        row_boundaries=(0.20, 0.30, 0.80),
+        vertical_lines=(0.10, 0.40, 0.70, 0.90),
+        name_left=0.70,
+        name_right=0.90,
+        notes_right=0.40,
+    )
+    cropped_path, cropped_grid = crop_table_for_ocr(sample, grid, padding=0.0)
+    try:
+        with Image.open(cropped_path) as cropped:
+            assert cropped.size == (800, 840)
+        assert cropped_grid.row_boundaries == (0.0, pytest.approx(1 / 6), 1.0)
+        assert cropped_grid.vertical_lines == (0.0, pytest.approx(0.375), pytest.approx(0.75), 1.0)
+        assert cropped_grid.name_left == pytest.approx(0.75)
+        assert cropped_grid.notes_right == pytest.approx(0.375)
+    finally:
+        cropped_path.unlink(missing_ok=True)
 
 
 def test_roster_column_selection_rejects_aligned_name_ink_as_rule():
