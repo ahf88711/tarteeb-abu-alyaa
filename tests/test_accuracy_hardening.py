@@ -20,6 +20,8 @@ from app.engine.ocr import (
     OcrToken,
     highlight_score,
     merge_ocr_observations,
+    ocr_max_side,
+    ocr_timeout_seconds,
     orient_document_image,
 )
 from app.engine.ranking import RankPerson, RankStatus, compare_two, rank_people
@@ -34,6 +36,19 @@ def person(name: str, values: list[tuple[int, int, int]]) -> RankPerson:
         normalized_name=make_master_key(name),
         dates=[HijriDate(*value) for value in values],
     )
+
+
+def test_render_ocr_limits_keep_consensus_practical(monkeypatch):
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://example.onrender.com")
+    monkeypatch.delenv("OCR_MAX_SIDE", raising=False)
+    monkeypatch.delenv("OCR_TIMEOUT_SECONDS", raising=False)
+    assert ocr_max_side() == 2400
+    assert ocr_timeout_seconds() == 300
+
+    monkeypatch.setenv("OCR_MAX_SIDE", "2700")
+    monkeypatch.setenv("OCR_TIMEOUT_SECONDS", "420")
+    assert ocr_max_side() == 2700
+    assert ocr_timeout_seconds() == 420
 
 
 def test_partial_order_keeps_strict_information_inside_unresolved_component():
