@@ -53,6 +53,16 @@ def ocr_timeout_seconds() -> int:
     return max(60, min(600, configured))
 
 
+def tesseract_environment() -> dict[str, str]:
+    """Keep Tesseract within the CPU/RAM available to the active runtime."""
+    env = os.environ.copy()
+    render_runtime = bool(os.getenv("RENDER_EXTERNAL_URL") or os.getenv("RENDER"))
+    default_threads = "1" if render_runtime else "2"
+    env.setdefault("OMP_THREAD_LIMIT", default_threads)
+    env.setdefault("OMP_NUM_THREADS", default_threads)
+    return env
+
+
 @dataclass
 class OcrToken:
     text: str
@@ -306,6 +316,7 @@ def _tesseract_ocr(path: Path, *, source: str, psm: int = 6) -> list[OcrToken]:
         capture_output=True,
         text=True,
         timeout=ocr_timeout_seconds(),
+        env=tesseract_environment(),
     )
     if proc.returncode != 0:
         raise RuntimeError(f"فشل Tesseract OCR: {proc.stderr[:600]}")
