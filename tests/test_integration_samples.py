@@ -6,6 +6,7 @@ These tests actually execute OCR/pipeline against attached samples.
 from __future__ import annotations
 
 import sys
+import os
 from pathlib import Path
 
 import pytest
@@ -15,18 +16,32 @@ sys.path.insert(0, str(ROOT))
 
 SAMPLES = ROOT / "data" / "samples"
 MASTER = SAMPLES / "master_sample.pdf"
-TARGETS = SAMPLES / "target_names.png"
+TARGETS = SAMPLES / "target_names_preview.jpg"
 
 
-@pytest.mark.skipif(not MASTER.exists(), reason="master sample missing")
+def _require_real_ocr() -> None:
+    """Use Apple Vision on macOS or local Arabic Tesseract on Linux."""
+    from app.engine.ocr import available_ocr_backends, ensure_ocr_binary
+
+    backends = available_ocr_backends()
+    if not backends:
+        pytest.skip("no Arabic OCR backend is available")
+    if "vision" in backends:
+        try:
+            ensure_ocr_binary()
+        except Exception as exc:
+            if "tesseract" not in backends:
+                pytest.skip(f"OCR backend unavailable: {exc}")
+
+
+@pytest.mark.skipif(
+    not MASTER.exists() or os.getenv("RUN_REAL_OCR_TESTS") != "1",
+    reason="real OCR test is opt-in (RUN_REAL_OCR_TESTS=1)",
+)
 def test_master_pdf_extraction_runs():
     from app.engine.extract_master import extract_master_pdf
-    from app.engine.ocr import ensure_ocr_binary
 
-    try:
-        ensure_ocr_binary()
-    except Exception as e:
-        pytest.skip(f"OCR binary unavailable: {e}")
+    _require_real_ocr()
 
     people = extract_master_pdf(MASTER)
     assert isinstance(people, dict)
@@ -42,9 +57,11 @@ def test_master_pdf_extraction_runs():
     assert any(k in joined for k in ("العنزي", "الحازمي", "الصلبي", "الرويلي", "البناقي"))
 
 
-@pytest.mark.skipif(not (MASTER.exists() and TARGETS.exists()), reason="samples missing")
+@pytest.mark.skipif(
+    not (MASTER.exists() and TARGETS.exists()) or os.getenv("RUN_REAL_OCR_TESTS") != "1",
+    reason="real OCR test is opt-in (RUN_REAL_OCR_TESTS=1)",
+)
 def test_full_pipeline_samples():
-    from app.engine.ocr import ensure_ocr_binary
     from app.engine.pipeline import (
         collect_dates_for_targets,
         load_master,
@@ -54,10 +71,7 @@ def test_full_pipeline_samples():
     )
     from app.engine.models import NameStatus
 
-    try:
-        ensure_ocr_binary()
-    except Exception as e:
-        pytest.skip(f"OCR binary unavailable: {e}")
+    _require_real_ocr()
 
     s = new_session()
     load_master(s, MASTER)
@@ -97,17 +111,16 @@ def test_full_pipeline_samples():
     assert results1 == results2
 
 
-@pytest.mark.skipif(not MASTER.exists(), reason="master sample missing")
+@pytest.mark.skipif(
+    not MASTER.exists() or os.getenv("RUN_REAL_OCR_TESTS") != "1",
+    reason="real OCR test is opt-in (RUN_REAL_OCR_TESTS=1)",
+)
 def test_entire_pdf_searched_not_first_hit_only():
     """Same person occurrences should merge dates across pages (single-page sample still merges)."""
     from app.engine.extract_master import extract_master_pdf
-    from app.engine.ocr import ensure_ocr_binary
     from app.engine.models import MasterPerson
 
-    try:
-        ensure_ocr_binary()
-    except Exception as e:
-        pytest.skip(f"OCR binary unavailable: {e}")
+    _require_real_ocr()
 
     people = extract_master_pdf(MASTER)
     # Each person object can accumulate multiple notes

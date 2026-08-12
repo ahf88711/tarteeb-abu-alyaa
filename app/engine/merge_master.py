@@ -13,7 +13,7 @@ from .models import MasterPerson, make_master_key
 def merge_people_dicts(
     *dicts: dict[str, MasterPerson],
 ) -> dict[str, MasterPerson]:
-    """Union all master people, merging by soft identity."""
+    """Union sources by conservative identity key; retain every source fact."""
     combined: dict[str, MasterPerson] = {}
     for d in dicts:
         for key, person in d.items():
@@ -25,16 +25,21 @@ def merge_people_dicts(
             for notes in person.notes_texts:
                 if notes not in primary.notes_texts:
                     primary.notes_texts.append(notes)
-            for dt in person.dates:
-                if not any(
-                    x.normalized.iso() == dt.normalized.iso() for x in primary.dates
-                ):
-                    primary.dates.append(dt)
+            # Duplicate normalized dates are removed only from the ranking key.
+            # All occurrences remain here for auditability.
+            primary.dates.extend(person.dates)
             for page in person.pages:
                 if page not in primary.pages:
                     primary.pages.append(page)
             if person.rank_title and not primary.rank_title:
                 primary.rank_title = person.rank_title
+            primary.occurrences.extend(person.occurrences)
+            for alias in person.aliases:
+                if alias not in primary.aliases:
+                    primary.aliases.append(alias)
+            primary.identity_needs_review = (
+                primary.identity_needs_review or person.identity_needs_review
+            )
     return _merge_near_duplicate_people(combined)
 
 

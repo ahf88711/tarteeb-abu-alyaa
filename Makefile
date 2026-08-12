@@ -1,4 +1,4 @@
-.PHONY: serve demo test rank keepalive install-keepalive
+.PHONY: serve demo test rank keepalive install-keepalive verify-linux
 
 serve:
 	python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8765
@@ -11,6 +11,9 @@ rank:
 
 test:
 	python3 -m pytest tests/ -q
+
+verify-linux:
+	python3 scripts/verify_linux_runtime.py
 
 keepalive:
 	bash scripts/keep_alive.sh

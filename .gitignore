@@ -12,7 +12,6 @@ venv/
 /tmp/
 # compiled OCR helper (rebuild with app.engine.ocr.ensure_ocr_binary)
 bin/ocr_vision
-bin/*.swift
 # large raw photos (keep smaller samples)
 data/samples/target_names.png
 *.heic

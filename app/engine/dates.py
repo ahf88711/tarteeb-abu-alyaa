@@ -60,6 +60,10 @@ class ExtractedDate:
     needs_review: bool = False
     review_reason: str = ""
     row_index: Optional[int] = None
+    source_image: str = ""
+    source_bbox: Optional[dict] = None
+    ocr_agreement: int = 1
+    row_association_confidence: float = 1.0
 
     def to_dict(self) -> dict:
         return {
@@ -75,6 +79,10 @@ class ExtractedDate:
             "needs_review": self.needs_review,
             "review_reason": self.review_reason,
             "row_index": self.row_index,
+            "source_image": self.source_image,
+            "source_bbox": self.source_bbox,
+            "ocr_agreement": self.ocr_agreement,
+            "row_association_confidence": self.row_association_confidence,
         }
 
 
@@ -106,7 +114,6 @@ def parse_hijri_date(text: str) -> Optional[HijriDate]:
     m = _DATE_PATTERNS[0].search(t)
     if m:
         y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        y, _, _ = _fix_ocr_year(y)
         try:
             return HijriDate(y, mo, d)
         except ValueError:
@@ -118,7 +125,6 @@ def parse_hijri_date(text: str) -> Optional[HijriDate]:
         # Ambiguous when both day and month ≤ 12 — refuse rather than guess
         if d <= 12 and mo <= 12:
             return None
-        y, _, _ = _fix_ocr_year(y)
         try:
             return HijriDate(y, mo, d)
         except ValueError:
@@ -135,6 +141,10 @@ def extract_all_dates(
     source_snippet: str = "",
     row_index: Optional[int] = None,
     expected_year_hint: Optional[int] = None,
+    source_image: str = "",
+    source_bbox: Optional[dict] = None,
+    ocr_agreement: int = 1,
+    row_association_confidence: float = 1.0,
 ) -> list[ExtractedDate]:
     if not text:
         return []
@@ -155,7 +165,7 @@ def extract_all_dates(
             y, year_fixed, year_reason = _fix_ocr_year(y)
             needs_review = False
             reason = ""
-            conf = confidence
+            conf = min(confidence, row_association_confidence)
 
             try:
                 hd = HijriDate(y, mo, d)
@@ -190,7 +200,16 @@ def extract_all_dates(
                     conf = min(conf, 0.65)
                     reason = reason or f"سنة بعيدة عن سياق المستند ({y})"
 
-            if conf < 0.75:
+            if row_association_confidence < 0.85:
+                needs_review = True
+                conf = min(conf, 0.82)
+                reason = reason or "ارتباط التاريخ بصف الشخص غير مؤكد هندسيًا"
+
+            if ocr_agreement <= 1 and confidence < 0.95:
+                # A single OCR observation is evidence, not automatic proof.
+                conf = min(conf, 0.88)
+
+            if conf < 0.85:
                 needs_review = True
                 reason = reason or "ثقة منخفضة في التعرف على التاريخ"
 
@@ -200,12 +219,16 @@ def extract_all_dates(
                     original_text=raw,
                     page=page,
                     confidence=conf,
-                    verified=not needs_review and conf >= 0.85,
+                    verified=not needs_review and conf >= 0.93,
                     source_snippet=source_snippet or text[:200],
                     person_name=person_name,
                     needs_review=needs_review,
                     review_reason=reason,
                     row_index=row_index,
+                    source_image=source_image,
+                    source_bbox=source_bbox,
+                    ocr_agreement=ocr_agreement,
+                    row_association_confidence=row_association_confidence,
                 )
             )
     return found
@@ -252,6 +275,10 @@ def revalidate_dates_with_hint(
             needs_review=d.needs_review,
             review_reason=d.review_reason,
             row_index=d.row_index,
+            source_image=d.source_image,
+            source_bbox=d.source_bbox,
+            ocr_agreement=d.ocr_agreement,
+            row_association_confidence=d.row_association_confidence,
         )
         y = dd.normalized.year
         if abs(y - hint) >= 20:

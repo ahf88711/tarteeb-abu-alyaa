@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -42,6 +42,7 @@ STATIC = APP_DIR / "static"
 SAMPLES = PROJECT_ROOT / "data" / "samples"
 UPLOAD_ROOT = Path(tempfile.gettempdir()) / "tarteeb_abu_alyaa_uploads"
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+from app.engine.ocr import EVIDENCE_ROOT
 
 app = FastAPI(title=APP_NAME_AR, version=__version__)
 
@@ -94,7 +95,7 @@ class DateReviewsBody(BaseModel):
 
 class RankBody(BaseModel):
     session_id: str
-    auto_verify_dates: bool = True
+    auto_verify_dates: bool = False
 
 
 class ManualNamesBody(BaseModel):
@@ -145,6 +146,8 @@ def _people_payload(s) -> list[dict]:
                 )
             ][:12],
             "needs_review_dates": sum(1 for d in p.dates if d.needs_review),
+            "identity_needs_review": p.identity_needs_review,
+            "aliases": p.aliases,
         }
         for p in people_sorted[:300]
     ]
@@ -153,6 +156,18 @@ def _people_payload(s) -> list[dict]:
 @app.get("/", response_class=HTMLResponse)
 def index():
     return HTMLResponse((STATIC / "index.html").read_text(encoding="utf-8"))
+
+
+@app.get("/api/evidence/{filename}")
+def evidence_image(filename: str):
+    """Serve generated audit crops without exposing arbitrary filesystem paths."""
+    safe_name = Path(filename).name
+    if safe_name != filename or not safe_name.lower().endswith((".jpg", ".jpeg", ".png")):
+        raise HTTPException(400, detail="اسم ملف الدليل غير صالح.")
+    path = EVIDENCE_ROOT / safe_name
+    if not path.is_file():
+        raise HTTPException(404, detail="صورة الدليل غير موجودة.")
+    return FileResponse(path)
 
 
 @app.get("/api/health")
@@ -164,6 +179,9 @@ def health():
 def capabilities():
     """Describe what this deployment supports (for UI / ops)."""
     ocr_bin = PROJECT_ROOT / "bin" / "ocr_vision"
+    from app.engine.ocr import available_ocr_backends
+
+    ocr_backends = available_ocr_backends()
     return {
         "name": APP_NAME_AR,
         "version": __version__,
@@ -191,6 +209,8 @@ def capabilities():
             "dark_mode",
         ],
         "ocr_binary_present": ocr_bin.exists(),
+        "ocr_backends": ocr_backends,
+        "arabic_ocr_available": bool(ocr_backends),
         "samples": {
             "master_pdf": (SAMPLES / "master_sample.pdf").exists(),
             "master_excel": (SAMPLES / "master_page3_clean.xlsx").exists(),
@@ -506,7 +526,7 @@ def names_manual(body: ManualNamesBody):
 
 class AutoConfirmBody(BaseModel):
     session_id: str
-    min_confidence: float = 0.92
+    min_confidence: float = 0.97
 
 
 @app.post("/api/names/auto_confirm")

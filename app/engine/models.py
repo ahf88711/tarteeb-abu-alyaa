@@ -29,6 +29,9 @@ class MasterPerson:
     dates: list[ExtractedDate] = field(default_factory=list)
     pages: list[int] = field(default_factory=list)
     row_indices: list[int] = field(default_factory=list)
+    occurrences: list[dict] = field(default_factory=list)
+    aliases: list[str] = field(default_factory=list)
+    identity_needs_review: bool = False
 
     def add_occurrence(
         self,
@@ -38,6 +41,11 @@ class MasterPerson:
         rank_title: str = "",
         row_index: int = 0,
         date_confidence: float = 0.9,
+        source_image: str = "",
+        source_bbox: Optional[dict] = None,
+        name_confidence: float = 0.0,
+        ocr_agreement: int = 1,
+        row_association_confidence: float = 1.0,
     ) -> None:
         if page not in self.pages:
             self.pages.append(page)
@@ -46,6 +54,17 @@ class MasterPerson:
         if rank_title and not self.rank_title:
             self.rank_title = rank_title
         self.row_indices.append(row_index)
+        self.occurrences.append(
+            {
+                "page": page,
+                "row_index": row_index,
+                "source_image": source_image,
+                "source_bbox": source_bbox,
+                "name_confidence": name_confidence,
+                "ocr_agreement": ocr_agreement,
+                "row_association_confidence": row_association_confidence,
+            }
+        )
         from .dates import extract_all_dates
 
         for d in extract_all_dates(
@@ -55,6 +74,10 @@ class MasterPerson:
             person_name=self.original_name,
             source_snippet=notes[:240],
             row_index=row_index,
+            source_image=source_image,
+            source_bbox=source_bbox,
+            ocr_agreement=ocr_agreement,
+            row_association_confidence=row_association_confidence,
         ):
             self.dates.append(d)
 
@@ -66,6 +89,9 @@ class MasterPerson:
             "pages": self.pages,
             "notes_texts": self.notes_texts,
             "dates": [d.to_dict() for d in self.dates],
+            "occurrences": self.occurrences,
+            "aliases": self.aliases,
+            "identity_needs_review": self.identity_needs_review,
         }
 
 

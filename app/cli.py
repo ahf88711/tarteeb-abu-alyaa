@@ -152,7 +152,7 @@ def _print_results(s) -> None:
         if r.get("rank") is None:
             continue
         print(
-            f"#{r['rank']:2d}  {r['original_name']:<30}  "
+            f"#{str(r.get('rank_display') or r['rank']):>2}  {r['original_name']:<30}  "
             f"أحدث={r.get('latest_date') or '—'}  "
             f"n={r.get('date_count', 0)}  {r.get('status')}"
         )

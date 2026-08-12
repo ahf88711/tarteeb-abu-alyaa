@@ -11,6 +11,12 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 
+def _rank_label(result: dict) -> str:
+    if result.get("rank_display"):
+        return str(result["rank_display"])
+    return str(result.get("rank")) if result.get("rank") is not None else "—"
+
+
 def export_ranking_text(results: list[dict], summary: dict) -> str:
     """Plain Arabic text suitable for WhatsApp / clipboard."""
     lines = [
@@ -25,7 +31,7 @@ def export_ranking_text(results: list[dict], summary: dict) -> str:
         if r.get("rank") is None:
             continue
         lines.append(
-            f"{r['rank']}. {r.get('original_name', '')} — "
+            f"{_rank_label(r)}. {r.get('original_name', '')} — "
             f"أحدث: {r.get('latest_date') or '—'} "
             f"({r.get('date_count', 0)} تاريخ) — {r.get('status', '')}"
         )
@@ -132,7 +138,7 @@ def export_excel(results: list[dict], summary: dict) -> bytes:
     for i, r in enumerate(results):
         row = 5 + i
         vals = [
-            r.get("rank") if r.get("rank") is not None else "—",
+            _rank_label(r),
             r.get("original_name"),
             r.get("latest_date") or "—",
             r.get("previous_date") or "—",
@@ -177,13 +183,22 @@ def _arabic_fonts():
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
 
-    font_dir = Path.home() / ".fonts_ar" / "formal"
-    regular = font_dir / "NotoNaskhArabic-Regular.ttf"
-    bold = font_dir / "NotoNaskhArabic-Bold.ttf"
-    if regular.exists():
-        pdfmetrics.registerFont(TTFont("Ar", str(regular)))
-        pdfmetrics.registerFont(TTFont("ArB", str(bold if bold.exists() else regular)))
-        return "Ar", "ArB"
+    candidates = (
+        Path.home() / ".fonts_ar" / "formal",
+        Path("/usr/share/fonts/truetype/noto"),
+        Path("/usr/share/fonts/opentype/noto"),
+    )
+    for font_dir in candidates:
+        regular = font_dir / "NotoNaskhArabic-Regular.ttf"
+        bold = font_dir / "NotoNaskhArabic-Bold.ttf"
+        if regular.is_file():
+            if "Ar" not in pdfmetrics.getRegisteredFontNames():
+                pdfmetrics.registerFont(TTFont("Ar", str(regular)))
+            if "ArB" not in pdfmetrics.getRegisteredFontNames():
+                pdfmetrics.registerFont(
+                    TTFont("ArB", str(bold if bold.is_file() else regular))
+                )
+            return "Ar", "ArB"
     return "Helvetica", "Helvetica-Bold"
 
 
@@ -247,7 +262,7 @@ def export_pdf_simple(results: list[dict], summary: dict) -> bytes:
                 P(r.get("previous_date") or "—", st_c),
                 P(r.get("latest_date") or "—", st_c),
                 P(r.get("original_name") or "", st_c),
-                P(str(r.get("rank") if r.get("rank") is not None else "—"), st_c),
+                P(_rank_label(r), st_c),
             ]
         )
 
@@ -366,7 +381,7 @@ def export_pdf_formal(
                 P(r.get("previous_date") or "—", st_c),
                 P(r.get("latest_date") or "—", st_c),
                 P(r.get("original_name") or "", st_c),
-                P(str(r.get("rank")), st_c),
+                P(_rank_label(r), st_c),
             ]
         )
 
@@ -443,4 +458,3 @@ def export_pdf_formal(
     ]
     doc.build(story)
     return bio.getvalue()
-

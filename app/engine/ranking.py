@@ -67,6 +67,12 @@ class RankEntry:
     equal_prefix_levels: int = 0
     group_size: int = 1
     comparison_path: list[dict] = field(default_factory=list)
+    rank_min: Optional[int] = None
+    rank_max: Optional[int] = None
+    rank_exact: bool = True
+    unresolved_with: list[str] = field(default_factory=list)
+    strictly_before: list[str] = field(default_factory=list)
+    strictly_after: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -85,6 +91,17 @@ class RankEntry:
             "previous_date": self.person.dates[1].display() if len(self.person.dates) > 1 else None,
             "date_count": len(self.person.dates),
             "comparison_path": self.comparison_path,
+            "rank_min": self.rank_min if self.rank_min is not None else self.rank,
+            "rank_max": self.rank_max if self.rank_max is not None else self.rank,
+            "rank_exact": self.rank_exact,
+            "rank_display": (
+                str(self.rank_min if self.rank_min is not None else self.rank)
+                if self.rank_exact
+                else f"{self.rank_min}–{self.rank_max}"
+            ),
+            "unresolved_with": self.unresolved_with,
+            "strictly_before": self.strictly_before,
+            "strictly_after": self.strictly_after,
         }
 
 
@@ -271,60 +288,220 @@ def _sanitize_person_dates(person: RankPerson) -> RankPerson:
     Callers may accidentally pass duplicates or unsorted sequences;
     ranking must never treat a duplicate as an extra historical level.
     """
-    if not person.dates:
-        return person
-    # set() dedupes HijriDate (frozen); sort newest first
-    person.dates = sorted(set(person.dates), reverse=True)
-    return person
+    # Never mutate caller-owned evidence while producing a ranking view.
+    return RankPerson(
+        id=person.id,
+        original_name=person.original_name,
+        normalized_name=person.normalized_name,
+        dates=sorted(set(person.dates), reverse=True),
+        meta=dict(person.meta),
+    )
 
 
 def rank_people(people: Sequence[RankPerson]) -> list[RankEntry]:
     """
-    Deterministically rank verified people.
+    Rank verified histories as a mathematically explicit partial order.
 
-    Returns RankEntry list ordered by rank ascending (1 = highest priority).
-    People with no dates are appended after ranked groups with NO_DATES status.
-
-    Within the same rank band (full/unresolved ties), members are ordered by
-    normalized_name for stable output only — this does NOT break ties for ranking.
+    Unequal prefix histories are incomparable, not equal. We therefore retain
+    every strict comparison that is still provable and expose an honest
+    ``rank_min..rank_max`` interval instead of discarding subgroup information
+    or inventing a total order.
     """
     people = [_sanitize_person_dates(p) for p in people]
     with_dates = [p for p in people if p.dates]
     without = [p for p in people if not p.dates]
-    # Stable input order for partition: sort by name so same-date bucket
-    # insertion order is deterministic across shuffles (ranks unchanged).
-    with_dates.sort(key=lambda p: (p.normalized_name, p.id))
     without.sort(key=lambda p: (p.normalized_name, p.id))
-
-    clusters = _partition(with_dates, level=0) if with_dates else []
-
     results: list[RankEntry] = []
-    current_rank = 1
 
-    for idx, cluster in enumerate(clusters):
-        # Stable member order within a band (presentation only)
-        members = sorted(cluster.people, key=lambda p: (p.normalized_name, p.id))
-        group_size = len(members)
+    # Identical full sequences form true tie classes.
+    classes_by_sequence: dict[tuple[HijriDate, ...], list[RankPerson]] = {}
+    for person in with_dates:
+        classes_by_sequence.setdefault(tuple(person.dates), []).append(person)
+    nodes = [
+        {
+            "sequence": sequence,
+            "people": sorted(members, key=lambda p: (p.normalized_name, p.id)),
+        }
+        for sequence, members in classes_by_sequence.items()
+    ]
+    nodes.sort(
+        key=lambda node: (
+            node["sequence"],
+            node["people"][0].normalized_name,
+            node["people"][0].id,
+        )
+    )
+    count = len(nodes)
+    edges: list[set[int]] = [set() for _ in range(count)]
+    incomparable: list[set[int]] = [set() for _ in range(count)]
+    comparison_levels: dict[tuple[int, int], int] = {}
+
+    for left in range(count):
+        for right in range(left + 1, count):
+            outcome = compare_two(nodes[left]["people"][0], nodes[right]["people"][0])
+            level = int(outcome.get("level") or 0)
+            comparison_levels[(left, right)] = level
+            if outcome["result"] == "a":
+                edges[left].add(right)
+            elif outcome["result"] == "b":
+                edges[right].add(left)
+            elif outcome["result"] == "unresolved":
+                incomparable[left].add(right)
+                incomparable[right].add(left)
+
+    # Transitive closure is cheap for the expected roster sizes and provides
+    # machine-checkable precedence/position bounds.
+    reach = [set(destinations) for destinations in edges]
+    changed = True
+    while changed:
+        changed = False
+        for source in range(count):
+            expanded = set(reach[source])
+            for destination in tuple(reach[source]):
+                expanded.update(reach[destination])
+            if expanded != reach[source]:
+                reach[source] = expanded
+                changed = True
+    if any(index in reach[index] for index in range(count)):
+        raise AssertionError("ranking relation produced a cycle")
+
+    ancestors: list[set[int]] = [set() for _ in range(count)]
+    for source, destinations in enumerate(reach):
+        for destination in destinations:
+            ancestors[destination].add(source)
+    sizes = [len(node["people"]) for node in nodes]
+    total = sum(sizes)
+    rank_min = [1 + sum(sizes[item] for item in ancestors[index]) for index in range(count)]
+    rank_max = [
+        total - sum(sizes[item] for item in reach[index]) - sizes[index] + 1
+        for index in range(count)
+    ]
+
+    # Connected incomparability components retain the legacy shared rank band,
+    # while rank_display/rank_min/rank_max carry the precise partial order.
+    component = list(range(count))
+
+    def find(index: int) -> int:
+        while component[index] != index:
+            component[index] = component[component[index]]
+            index = component[index]
+        return index
+
+    def union(a: int, b: int) -> None:
+        root_a, root_b = find(a), find(b)
+        if root_a != root_b:
+            component[root_b] = root_a
+
+    for index, peers in enumerate(incomparable):
+        for peer in peers:
+            union(index, peer)
+    component_rank: dict[int, int] = {}
+    for index in range(count):
+        root = find(index)
+        component_rank[root] = min(component_rank.get(root, rank_min[index]), rank_min[index])
+
+    # Deterministic topological presentation. Name/id is presentation-only for
+    # incomparable nodes and is never reported as a business tie-breaker.
+    remaining = set(range(count))
+    order: list[int] = []
+    while remaining:
+        ready = [index for index in remaining if not (ancestors[index] & remaining)]
+        if not ready:
+            raise AssertionError("no acyclic presentation order")
+        ready.sort(
+            key=lambda index: (
+                rank_min[index],
+                nodes[index]["sequence"],
+                nodes[index]["people"][0].normalized_name,
+                nodes[index]["people"][0].id,
+            )
+        )
+        for index in ready:
+            order.append(index)
+            remaining.remove(index)
+
+    for index in order:
+        members: list[RankPerson] = nodes[index]["people"]
+        unresolved_names = sorted(
+            person.original_name
+            for peer in incomparable[index]
+            for person in nodes[peer]["people"]
+        )
+        before_names = sorted(
+            person.original_name
+            for peer in reach[index]
+            for person in nodes[peer]["people"]
+        )
+        after_names = sorted(
+            person.original_name
+            for peer in ancestors[index]
+            for person in nodes[peer]["people"]
+        )
+        exact = rank_min[index] == rank_max[index]
+        status = (
+            RankStatus.UNRESOLVED
+            if unresolved_names
+            else RankStatus.TIE
+            if len(members) > 1
+            else RankStatus.RANKED
+        )
+        legacy_rank = (
+            component_rank[find(index)] if unresolved_names else rank_min[index]
+        )
         for person in members:
-            explanation, path = _build_explanation(person, cluster, clusters, idx)
-            status = cluster.status
-            if group_size == 1:
-                status = RankStatus.RANKED
+            sequence_ar = " ← ".join(date.display_ar() for date in person.dates)
+            path: list[dict] = [
+                {
+                    "type": "partial_order_bounds",
+                    "rank_min": rank_min[index],
+                    "rank_max": rank_max[index],
+                    "strictly_before": before_names,
+                    "strictly_after": after_names,
+                    "unresolved_with": unresolved_names,
+                }
+            ]
+            if status == RankStatus.UNRESOLVED:
+                explanation = (
+                    f"تسلسل تواريخ «{person.original_name}» (من الأحدث للأقدم): {sequence_ar}. "
+                    f"الموضع الممكن من {rank_min[index]} إلى {rank_max[index]}؛ تعذّر حسم المقارنة "
+                    f"مع {' و '.join(f'«{name}»' for name in unresolved_names)} لأن أحد التسلسلين "
+                    "انتهى بعد بادئة متطابقة. لم يُختلق كسر تعادل."
+                )
+                if before_names:
+                    explanation += " يسبق حتمًا: " + "، ".join(before_names) + "."
+                if after_names:
+                    explanation += " يسبقه حتمًا: " + "، ".join(after_names) + "."
+            elif status == RankStatus.TIE:
+                names = " و ".join(f"«{member.original_name}»" for member in members)
+                explanation = (
+                    f"تعادل تام بين {names}: التسلسل التاريخي الموثق متطابق بالكامل. "
+                    "لم يُطبَّق أي كسر تعادل إضافي."
+                )
+                path.append({"type": "full_tie", "group": [p.original_name for p in members]})
+            else:
+                explanation = (
+                    f"تسلسل تواريخ «{person.original_name}» (من الأحدث للأقدم): {sequence_ar}. "
+                    f"الموضع {rank_min[index]} محسوم بالمقارنة المعجمية التاريخية؛ الأقدم يتقدم "
+                    "عند أول اختلاف."
+                )
             results.append(
                 RankEntry(
-                    rank=current_rank,
+                    rank=legacy_rank,
                     person=person,
                     status=status,
                     explanation=explanation,
-                    resolution_level=cluster.resolution_level,
-                    equal_prefix_levels=cluster.equal_prefix_levels,
-                    group_size=group_size,
+                    group_size=len(members) if not unresolved_names else 1 + len(unresolved_names),
                     comparison_path=path,
+                    rank_min=rank_min[index],
+                    rank_max=rank_max[index],
+                    rank_exact=exact,
+                    unresolved_with=unresolved_names,
+                    strictly_before=before_names,
+                    strictly_after=after_names,
                 )
             )
 
-        current_rank += group_size
-
+    current_rank = total + 1
     for person in without:
         results.append(
             RankEntry(
@@ -333,6 +510,8 @@ def rank_people(people: Sequence[RankPerson]) -> list[RankEntry]:
                 status=RankStatus.NO_DATES,
                 explanation="لا توجد تواريخ صالحة ومعتمدة؛ لا يدخل في المقارنة التاريخية.",
                 group_size=len(without),
+                rank_min=current_rank,
+                rank_max=current_rank,
             )
         )
     if without:
@@ -355,6 +534,9 @@ def _annotate_vs_previous(results: list[RankEntry]) -> None:
         if prev is None or prev.status == RankStatus.NO_DATES:
             if e.rank == 1 and e.status == RankStatus.RANKED:
                 e.explanation += " (الأول في الترتيب حسب القاعدة)."
+            prev = e
+            continue
+        if e.status == RankStatus.UNRESOLVED or prev.status == RankStatus.UNRESOLVED:
             prev = e
             continue
         if e.rank == prev.rank:

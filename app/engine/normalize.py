@@ -59,15 +59,6 @@ def soft_normalize_for_fuzzy(text: str) -> str:
     # Common prefix/spacing variants
     t = t.replace("عبدال", "عبد ال")
     t = t.replace("عبد ال", "عبدال")  # normalize to compact form
-    # Family-name OCR drift (soft only)
-    for a, b in (
-        ("البنافي", "البناقي"),
-        ("البناهي", "البناقي"),
-        ("العازمي", "الحازمي"),
-        ("الصلبى", "الصلبي"),
-        ("المنزي", "العنزي"),
-    ):
-        t = t.replace(a, b)
     t = _WHITESPACE.sub(" ", t).strip()
     return t
 
@@ -78,25 +69,26 @@ def tokenize_name(text: str) -> list[str]:
 
 
 def _char_similarity(a: str, b: str) -> float:
-    """Simple character-level ratio for short tokens (family names)."""
+    """Normalized Levenshtein similarity for one token."""
     if not a or not b:
         return 0.0
     if a == b:
         return 1.0
-    # Levenshtein-lite for short strings
-    if abs(len(a) - len(b)) > 2:
-        return 0.0
-    # longest common subsequence ratio
     la, lb = len(a), len(b)
-    dp = [[0] * (lb + 1) for _ in range(la + 1)]
-    for i in range(1, la + 1):
-        for j in range(1, lb + 1):
-            if a[i - 1] == b[j - 1]:
-                dp[i][j] = dp[i - 1][j - 1] + 1
-            else:
-                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
-    lcs = dp[la][lb]
-    return (2 * lcs) / (la + lb)
+    previous = list(range(lb + 1))
+    for i, char_a in enumerate(a, 1):
+        current = [i]
+        for j, char_b in enumerate(b, 1):
+            current.append(
+                min(
+                    current[j - 1] + 1,
+                    previous[j] + 1,
+                    previous[j - 1] + (char_a != char_b),
+                )
+            )
+        previous = current
+    distance = previous[-1]
+    return max(0.0, 1.0 - distance / max(la, lb))
 
 
 def name_similarity(a: str, b: str) -> float:
@@ -111,55 +103,46 @@ def name_similarity(a: str, b: str) -> float:
         return 1.0
     sa, sb = soft_normalize_for_fuzzy(a), soft_normalize_for_fuzzy(b)
     if sa == sb:
-        return 0.96
+        # Soft equality can collapse ة/ه or ى/ي. It is strong candidate
+        # evidence, but deliberately below the automatic identity threshold.
+        return 0.94
 
     la, lb = sa.split(), sb.split()
     if not la or not lb:
         return 0.0
 
-    ta, tb = set(la), set(lb)
-    inter = len(ta & tb)
-    union = len(ta | tb)
-    jacc = inter / union if union else 0.0
-
-    bonus = 0.0
-    # First name match
-    if la[0] == lb[0]:
-        bonus += 0.12
-    elif _char_similarity(la[0], lb[0]) >= 0.8:
-        bonus += 0.06
-
-    # Family name (last token) match — strong signal
-    if la[-1] == lb[-1]:
-        bonus += 0.15
+    first = _char_similarity(la[0], lb[0])
+    family = _char_similarity(la[-1], lb[-1])
+    if len(la) == len(lb):
+        aligned = [_char_similarity(x, y) for x, y in zip(la, lb)]
+        middle = sum(aligned[1:-1]) / max(1, len(aligned) - 2)
+        score = 0.32 * first + 0.32 * family + 0.36 * middle
+        if len(la) == 2:
+            score = 0.5 * first + 0.5 * family
+        # Same first/family but a materially different patronymic is exactly
+        # the dangerous سعد/سعيد case: always require human review.
+        if len(la) >= 3 and first == 1.0 and family == 1.0 and min(aligned[1:-1]) < 0.75:
+            score = min(score, 0.88)
     else:
-        fam = _char_similarity(la[-1], lb[-1])
-        if fam >= 0.85:
-            bonus += 0.12
-        elif fam >= 0.7:
-            bonus += 0.06
+        shorter, longer = (la, lb) if len(la) < len(lb) else (lb, la)
+        # Ordered subsequence alignment. Missing name components are never
+        # treated like exact agreement.
+        cursor = 0
+        similarities: list[float] = []
+        for token in shorter:
+            candidates = [
+                (_char_similarity(token, other), index)
+                for index, other in enumerate(longer[cursor:], cursor)
+            ]
+            if not candidates:
+                break
+            sim, index = max(candidates)
+            similarities.append(sim)
+            cursor = index + 1
+        aligned_mean = sum(similarities) / max(1, len(longer))
+        score = 0.28 * first + 0.28 * family + 0.44 * aligned_mean
+        score *= max(0.55, 1.0 - 0.13 * abs(len(la) - len(lb)))
 
-    # Same length names: compare middle tokens
-    if len(la) == len(lb) == 3:
-        mid = _char_similarity(la[1], lb[1])
-        if la[1] == lb[1]:
-            bonus += 0.1
-        elif mid >= 0.8:
-            bonus += 0.05
-        elif mid < 0.5 and la[0] == lb[0] and la[-1] == lb[-1]:
-            # first+last same but middle different (سعد vs سعيد) — cap score
-            return min(0.88, jacc + bonus)
-
-    # first+last strong agreement even if OCR mangled middle of full string
-    first_ok = la[0] == lb[0] or _char_similarity(la[0], lb[0]) >= 0.85
-    last_ok = la[-1] == lb[-1] or _char_similarity(la[-1], lb[-1]) >= 0.85
-    if first_ok and last_ok and min(len(la), len(lb)) >= 2:
-        bonus += 0.08
-
-    score = min(1.0, jacc + bonus)
-
-    # Penalize very different token counts with low overlap
-    if abs(len(la) - len(lb)) >= 2 and inter <= 1:
-        score *= 0.7
-
-    return score
+    if first < 0.6 or family < 0.6:
+        score *= 0.72
+    return max(0.0, min(0.99, score))

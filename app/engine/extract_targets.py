@@ -1,211 +1,309 @@
-"""Extract and verify target names from photographed/scanned list."""
+"""Conservative extraction and verification of photographed target names."""
 
 from __future__ import annotations
 
 import re
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Optional
 
+import pypdfium2 as pdfium
+
 from .models import MasterPerson, NameStatus, TargetName, make_master_key
-from .normalize import name_similarity, normalize_arabic_name, soft_normalize_for_fuzzy
-from .ocr import load_image_any, ocr_image, OcrToken
+from .normalize import name_similarity, normalize_arabic_name
+from .ocr import (
+    OcrToken,
+    highlight_score,
+    load_image_any,
+    ocr_consensus,
+    save_region_crop,
+)
 
 _NOISE = re.compile(
     r"(وزارة|المملكة|الداخلية|حرس|الحدود|قيادة|قطاع|بيان|التكميل|اليومي|"
     r"أفراد|المنفذ|التوقيع|الرتبة|الأسم|الاسم|معد|الملاحظات|إجازة|اجازة|"
     r"رخصة|تأخير|تاخير|موجود|نضار|بسم|الله|اللّه|الرحمن|الرحيم|الموافق|"
     r"يوم|الثلاثاء|الاثنين|الأحد|السبت|الخميس|الجمعة|الأربعاء|"
-    r"عنه|لمدة|ساعة|ساعات|أيام|اعتبارا|اعتبارًا|الموجود|العريف)"
+    r"عنه|لمدة|ساعة|ساعات|أيام|اعتبارا|اعتبارًا|الموجود)"
+)
+_RANK = re.compile(
+    r"\b(عريف|جندي\s*أول|جندي\s*اول|جندي|جندى|رقيب|و\.?\s*رقيب|وكيل\s*رقيب|ملازم|نقيب)\b"
 )
 
-_RANK_ONLY = re.compile(
-    r"^(عريف|جندي\s*أول|جندي\s*اول|جندي|جندى|رقيب|و\.?\s*رقيب|وكيل|ملازم|نقيب)$"
-)
+
+def _strip_non_name_fields(text: str) -> str:
+    text = re.sub(r"^(الأسم|الاسم)\s*:\s*", "", text.strip())
+    text = _RANK.sub(" ", text)
+    text = re.sub(r"^[٠-٩0-9]+\s*[-–.]?\s*", "", text)
+    return re.sub(r"\s+", " ", text).strip(" -–.،")
 
 
 def _is_name_candidate(text: str) -> bool:
-    t = normalize_arabic_name(text)
-    if not t or len(t) < 6:
+    value = normalize_arabic_name(_strip_non_name_fields(text))
+    if not value or len(value) < 6:
         return False
-    parts = [p for p in t.split() if p]
-    if len(parts) < 2 or len(parts) > 5:
+    parts = [part for part in value.split() if part]
+    if len(parts) < 2 or len(parts) > 6:
         return False
-    if _RANK_ONLY.match(t):
+    if _NOISE.search(value):
         return False
-    if _NOISE.search(t):
+    if sum(char.isdigit() or char in "٠١٢٣٤٥٦٧٨٩" for char in value) > 0:
         return False
-    # Reject if too many digits
-    if sum(ch.isdigit() or ch in "٠١٢٣٤٥٦٧٨٩" for ch in t) > 2:
-        return False
-    # Reject glued rank lists
-    if t.count("عريف") >= 1 and len(parts) > 3:
-        return False
-    arabic_parts = [p for p in parts if re.search(r"[\u0600-\u06FF]", p)]
-    return len(arabic_parts) >= 2
+    return all(re.search(r"[\u0600-\u06FF]", part) for part in parts)
+
+
+def _combine_tokens(tokens: list[OcrToken]) -> list[tuple[str, OcrToken]]:
+    """Recover full names when an OCR backend emits one token per word."""
+    rows: list[list[OcrToken]] = []
+    for token in sorted(tokens, key=lambda item: (item.cy, -item.x)):
+        group = next(
+            (
+                row
+                for row in rows
+                if abs(sum(item.cy for item in row) / len(row) - token.cy)
+                <= max(0.012, token.h * 0.65)
+            ),
+            None,
+        )
+        if group is None:
+            rows.append([token])
+        else:
+            group.append(token)
+
+    out: list[tuple[str, OcrToken]] = []
+    for row in rows:
+        ordered = sorted(row, key=lambda item: -item.x)
+        # Existing line-level observations remain valuable.
+        for token in ordered:
+            cleaned = _strip_non_name_fields(token.text)
+            if _is_name_candidate(cleaned):
+                out.append((cleaned, token))
+
+        # Join spatially adjacent word observations. Split at large gaps so a
+        # rank/notes cell cannot silently enter the name.
+        segments: list[list[OcrToken]] = []
+        for token in ordered:
+            if not re.search(r"[\u0600-\u06FF]", token.text):
+                continue
+            if not segments:
+                segments.append([token])
+                continue
+            previous = segments[-1][-1]
+            gap = previous.x - (token.x + token.w)
+            if gap <= max(0.035, 1.8 * max(previous.h, token.h)):
+                segments[-1].append(token)
+            else:
+                segments.append([token])
+        for segment in segments:
+            if len(segment) < 2:
+                continue
+            text = _strip_non_name_fields(" ".join(token.text for token in segment))
+            if not _is_name_candidate(text):
+                continue
+            left = min(token.x for token in segment)
+            right = max(token.x + token.w for token in segment)
+            top = min(token.cy - token.h / 2 for token in segment)
+            bottom = max(token.cy + token.h / 2 for token in segment)
+            confidence = sum(token.confidence for token in segment) / len(segment)
+            combined = OcrToken(
+                text=text,
+                x=left,
+                y=1.0 - bottom,
+                w=right - left,
+                h=bottom - top,
+                confidence=confidence,
+                alternatives=[alt for token in segment for alt in token.alternatives][:6],
+                agreement=min(token.agreement for token in segment),
+                source="combined",
+            )
+            out.append((text, combined))
+    return out
 
 
 def extract_name_tokens(tokens: list[OcrToken]) -> list[tuple[str, OcrToken]]:
-    """Prefer individual OCR tokens that look like person names."""
-    candidates: list[tuple[str, OcrToken]] = []
-    for t in tokens:
-        text = t.text.strip()
-        text = re.sub(r"^(الأسم|الاسم)\s*:\s*", "", text)
-        # Skip very wide tokens (often full-line garbage)
-        if t.w > 0.45:
-            continue
-        if _is_name_candidate(text):
-            candidates.append((text, t))
-
-    seen: set[str] = set()
-    unique: list[tuple[str, OcrToken]] = []
-    for text, tok in candidates:
+    candidates = _combine_tokens(tokens)
+    # Keep the strongest reading for each normalized identity.
+    best: dict[str, tuple[str, OcrToken]] = {}
+    for text, token in candidates:
         key = make_master_key(text)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append((text, tok))
-    return unique
+        current = best.get(key)
+        strength = (token.agreement, token.confidence, len(text))
+        if current is None or strength > (
+            current[1].agreement,
+            current[1].confidence,
+            len(current[0]),
+        ):
+            best[key] = (text, token)
+    return list(best.values())
 
 
 def match_to_master(
     ocr_name: str,
     master: dict[str, MasterPerson],
     *,
-    high: float = 0.92,
-    ambiguous_gap: float = 0.08,
+    high: float = 0.97,
+    ambiguous_gap: float = 0.10,
 ) -> tuple[NameStatus, float, list[dict], Optional[str]]:
-    """Match OCR name against master. Never force ambiguous identity."""
+    """Generate identity candidates; only an exact conservative key auto-verifies."""
     if not master:
-        return NameStatus.NEEDS_REVIEW, 0.5, [], None
-
-    from .models import make_master_key
-
-    ocr_key = make_master_key(ocr_name)
-
-    # 1) Exact normalized key — definitive (no ambiguity possible for identity)
-    if ocr_key and ocr_key in master:
-        p = master[ocr_key]
+        return NameStatus.NEEDS_REVIEW, 0.0, [], None
+    key = make_master_key(ocr_name)
+    if key and key in master:
+        person = master[key]
         return (
             NameStatus.VERIFIED,
             1.0,
-            [
-                {
-                    "name": p.original_name,
-                    "normalized": p.normalized_name,
-                    "confidence": 1.0,
-                    "pages": p.pages,
-                }
-            ],
-            p.original_name,
+            [{
+                "name": person.original_name,
+                "normalized": person.normalized_name,
+                "confidence": 1.0,
+                "pages": person.pages,
+            }],
+            person.original_name,
         )
 
-    scored: list[tuple[float, MasterPerson]] = []
-    for person in master.values():
-        s = name_similarity(ocr_name, person.original_name)
-        s2 = name_similarity(
-            soft_normalize_for_fuzzy(ocr_name),
-            soft_normalize_for_fuzzy(person.original_name),
-        )
-        s = max(s, s2 * 0.98)
-        if s >= 0.55:
-            scored.append((s, person))
-    scored.sort(key=lambda x: -x[0])
-
+    scored = sorted(
+        (
+            (name_similarity(ocr_name, person.original_name), person)
+            for person in master.values()
+        ),
+        key=lambda item: (-item[0], item[1].normalized_name),
+    )
+    scored = [item for item in scored if item[0] >= 0.52]
     if not scored:
-        return NameStatus.NOT_IN_MASTER, 0.2, [], None
-
-    best_s, best_p = scored[0]
+        return NameStatus.NOT_IN_MASTER, 0.0, [], None
+    best_score, best_person = scored[0]
     candidates = [
         {
-            "name": p.original_name,
-            "normalized": p.normalized_name,
-            "confidence": round(s, 4),
-            "pages": p.pages,
+            "name": person.original_name,
+            "normalized": person.normalized_name,
+            "confidence": round(score, 4),
+            "pages": person.pages,
         }
-        for s, p in scored[:5]
+        for score, person in scored[:7]
     ]
-
-    # 2) Two close high scores for different people → human review
-    if len(scored) >= 2:
-        s2, p2 = scored[1]
+    if len(scored) > 1 and best_score >= 0.68:
+        second_score, second_person = scored[1]
         if (
-            best_p.normalized_name != p2.normalized_name
-            and (best_s - s2) < ambiguous_gap
-            and best_s >= 0.70
+            second_person.normalized_name != best_person.normalized_name
+            and best_score - second_score < ambiguous_gap
         ):
-            return NameStatus.AMBIGUOUS, best_s, candidates, None
+            return NameStatus.AMBIGUOUS, best_score, candidates, None
+    if best_score >= 0.62:
+        # Even a very strong fuzzy result remains a proposal. OCR confidence
+        # and master similarity are not independent proof of identity.
+        return NameStatus.NEEDS_REVIEW, best_score, candidates, best_person.original_name
+    return NameStatus.NOT_IN_MASTER, best_score, candidates, None
 
-    # 3) High confidence unique winner
-    if best_s >= high:
-        return NameStatus.VERIFIED, best_s, candidates, best_p.original_name
 
-    # 4) Medium → review (never auto-verify)
-    if best_s >= 0.80:
-        return NameStatus.NEEDS_REVIEW, best_s, candidates, best_p.original_name
+def _render_target_pdf(path: Path) -> list[Path]:
+    document = pdfium.PdfDocument(str(path))
+    images: list[Path] = []
+    try:
+        for index in range(len(document)):
+            page = document[index]
+            width, height = page.get_size()
+            scale = max(1.0, min(4.0, 3200.0 / max(width, height)))
+            image = page.render(scale=scale).to_pil().convert("RGB")
+            destination = Path(tempfile.mkstemp(prefix=f"targets_{index + 1}_", suffix=".png")[1])
+            image.save(destination, "PNG")
+            images.append(destination)
+    finally:
+        document.close()
+    return images
 
-    if best_s >= 0.62:
-        return (
-            NameStatus.NEEDS_REVIEW,
-            best_s,
-            candidates,
-            best_p.original_name if best_s >= 0.72 else None,
+
+def _extract_page(
+    path: Path,
+    master: dict[str, MasterPerson],
+    *,
+    page_number: int,
+) -> list[TargetName]:
+    tokens = ocr_consensus(path)
+    highlighted = [(token, highlight_score(path, token)) for token in tokens]
+    highlighted_tokens = [token for token, score in highlighted if score >= 0.035]
+    selection_mode = "highlighted" if highlighted_tokens else "all_names"
+    source_tokens = highlighted_tokens or tokens
+    raw_names = extract_name_tokens(source_tokens)
+
+    results: list[TargetName] = []
+    for text, token in raw_names:
+        key = make_master_key(text)
+        status, match_conf, candidates, matched = match_to_master(text, master)
+        visual_conf = max(0.0, min(1.0, token.confidence))
+        identity_conf = 0.58 * visual_conf + 0.42 * match_conf
+        if status == NameStatus.VERIFIED and (
+            visual_conf < 0.82 or token.agreement < 2
+        ):
+            status = NameStatus.NEEDS_REVIEW
+        crop_path = save_region_crop(
+            path,
+            x=token.x,
+            top=token.cy - token.h / 2,
+            w=token.w,
+            h=token.h,
+            prefix=f"target_p{page_number}",
+            padding=0.012,
         )
-
-    if best_s >= 0.55:
-        return NameStatus.NEEDS_REVIEW, best_s, candidates, None
-
-    return NameStatus.NOT_IN_MASTER, best_s, candidates, None
+        score = highlight_score(path, token) if selection_mode == "highlighted" else 0.0
+        results.append(
+            TargetName(
+                id=str(uuid.uuid4())[:8],
+                original_name=text,
+                normalized_name=key,
+                ocr_raw=token.text,
+                confidence=round(identity_conf, 4),
+                status=status,
+                crop_path=crop_path,
+                candidates=candidates,
+                matched_master_name=matched,
+                bbox={
+                    "x": token.x,
+                    "y": token.y,
+                    "w": token.w,
+                    "h": token.h,
+                    "page": page_number,
+                    "visual_confidence": round(visual_conf, 4),
+                    "ocr_agreement": token.agreement,
+                    "ocr_alternatives": token.alternatives,
+                    "selection_mode": selection_mode,
+                    "highlight_score": round(score, 4),
+                },
+            )
+        )
+    return results
 
 
 def extract_target_names(
     path: Path,
     master: dict[str, MasterPerson],
 ) -> list[TargetName]:
-    """High-risk extraction with master cross-check. No forced matches."""
-    img = load_image_any(path)
-    tokens = ocr_image(img, preprocess=True)
-    raw_names = extract_name_tokens(tokens)
+    """Extract every target page; highlighted rosters select highlights only."""
+    temporary: list[Path] = []
+    if path.suffix.lower() == ".pdf":
+        pages = _render_target_pdf(path)
+        temporary.extend(pages)
+    else:
+        pages = [load_image_any(path)]
 
     results: list[TargetName] = []
-    seen: set[str] = set()
+    try:
+        for page_number, page in enumerate(pages, 1):
+            results.extend(_extract_page(page, master, page_number=page_number))
+    finally:
+        for item in temporary:
+            item.unlink(missing_ok=True)
 
-    for text, tok in raw_names:
-        key = make_master_key(text)
-        if key in seen:
-            continue
-        seen.add(key)
-
-        status, conf, candidates, matched = match_to_master(text, master)
-
-        # Exact key in master → verified
-        if key in master:
-            status = NameStatus.VERIFIED
-            conf = max(conf, 0.99)
-            matched = master[key].original_name
-            candidates = [
-                {
-                    "name": master[key].original_name,
-                    "normalized": key,
-                    "confidence": 0.99,
-                    "pages": master[key].pages,
-                }
-            ] + [c for c in candidates if c["normalized"] != key]
-
-        results.append(
-            TargetName(
-                id=str(uuid.uuid4())[:8],
-                original_name=text.strip(),
-                normalized_name=key,
-                ocr_raw=tok.text,
-                confidence=round(conf, 4),
-                status=status,
-                candidates=candidates,
-                matched_master_name=matched,
-                bbox={"x": tok.x, "y": tok.y, "w": tok.w, "h": tok.h},
-            )
-        )
-
-    # Sort roughly top-to-bottom using Vision y (higher y = higher on page in our cy)
-    results.sort(key=lambda t: (t.bbox or {}).get("y", 0), reverse=True)
-    return results
+    best: dict[str, TargetName] = {}
+    for target in results:
+        current = best.get(target.normalized_name)
+        if current is None or target.confidence > current.confidence:
+            best[target.normalized_name] = target
+    return sorted(
+        best.values(),
+        key=lambda target: (
+            int((target.bbox or {}).get("page", 0)),
+            -float((target.bbox or {}).get("y", 0.0)),
+        ),
+    )

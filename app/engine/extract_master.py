@@ -4,19 +4,18 @@ from __future__ import annotations
 
 import re
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import pypdfium2 as pdfium
+from PIL import Image, ImageOps
 
-from .dates import (
-    document_year_hint,
-    extract_all_dates,
-    revalidate_dates_with_hint,
-)
+from .dates import extract_all_dates
 from .models import MasterPerson, make_master_key
 from .normalize import normalize_arabic_name
-from .ocr import ocr_image, OcrToken
+from .ocr import OcrToken, ocr_consensus, save_region_crop
 
 _RANK_EXACT = {
     "عريف", "جندي", "جندى", "جندي اول", "جندي أول", "جندى اول", "جندى أول",
@@ -36,9 +35,11 @@ def render_pdf_pages(pdf_path: Path, scale: float = 3.0) -> list[Path]:
     try:
         for i in range(len(pdf)):
             page = pdf[i]
-            pil = page.render(scale=scale).to_pil()
-            out = Path(tempfile.mkstemp(prefix=f"master_p{i+1}_", suffix=".jpg")[1])
-            pil.convert("RGB").save(out, "JPEG", quality=93)
+            width, height = page.get_size()
+            adaptive_scale = max(1.0, min(4.0, 3400.0 / max(width, height)))
+            pil = page.render(scale=adaptive_scale).to_pil()
+            out = Path(tempfile.mkstemp(prefix=f"master_p{i+1}_", suffix=".png")[1])
+            pil.convert("RGB").save(out, "PNG")
             paths.append(out)
     finally:
         pdf.close()
@@ -53,27 +54,6 @@ def _clean_name(text: str) -> str:
         if t.endswith(" " + r) or t.endswith(r):
             t = t[: -len(r)].strip()
     t = t.replace("مريف", "").replace("هريف", "").strip()
-    # Common OCR confusions on scanned Arabic tables (display cleaned)
-    replacements = [
-        ("مبدائه", "عبدالله"),
-        ("مبداله", "عبدالله"),
-        ("مبدالله", "عبدالله"),
-        ("مبدالعزيز", "عبدالعزيز"),
-        ("عبد العزيز", "عبدالعزيز"),
-        ("اليصل", "فيصل"),
-        ("ذايف", "نايف"),
-        ("هجاج", "عجاج"),
-        ("المنزي", "العنزي"),
-        ("البناهي", "البناقي"),
-        ("البنافي", "البناقي"),
-        ("الصلير", "الصلبي"),
-        ("الصلبى", "الصلبي"),
-        ("الحازمى", "الحازمي"),
-        ("العازمي", "الحازمي"),  # common OCR miss of leading ح
-        ("امجد", "أمجد"),
-    ]
-    for a, b in replacements:
-        t = t.replace(a, b)
     return t.strip()
 
 
@@ -126,83 +106,243 @@ def _cluster_rows(tokens: list[OcrToken], y_tol: float = 0.014) -> list[list[Ocr
     return rows
 
 
-def parse_page_tokens(tokens: list[OcrToken], page_num: int) -> list[dict]:
-    rows_out: list[dict] = []
+@dataclass(frozen=True)
+class TableGrid:
+    """Detected table geometry in normalized top-origin coordinates."""
 
-    for idx, row_tokens in enumerate(_cluster_rows(tokens)):
-        if not row_tokens:
-            continue
-        joined = " ".join(t.text for t in row_tokens)
+    row_boundaries: tuple[float, ...]
+    vertical_lines: tuple[float, ...]
+    name_left: float
+    name_right: float
+    notes_right: float
+
+
+def _cluster_axis(
+    indices: np.ndarray, size: int, *, merge_distance: float = 0.006
+) -> list[float]:
+    if indices.size == 0:
+        return []
+    clusters: list[list[int]] = [[int(indices[0])]]
+    for value in indices[1:]:
+        number = int(value)
+        if number - clusters[-1][-1] <= max(3, round(size * merge_distance)):
+            clusters[-1].append(number)
+        else:
+            clusters.append([number])
+    return [float(np.mean(cluster)) / size for cluster in clusters]
+
+
+def detect_table_grid(image_path: Path) -> Optional[TableGrid]:
+    """Detect table rules using projection profiles; fail closed if uncertain."""
+    with Image.open(image_path) as source:
+        image = ImageOps.exif_transpose(source.convert("L"))
+        if image.width > 1800:
+            ratio = 1800 / image.width
+            image = image.resize(
+                (1800, max(1, round(image.height * ratio))), Image.Resampling.LANCZOS
+            )
+        array = np.asarray(ImageOps.autocontrast(image, cutoff=1), dtype=np.uint8)
+    # A low absolute threshold resists page shadows; autocontrast has already
+    # normalized genuinely dark table rules close to black.
+    dark = array < 110
+    height, width = dark.shape
+    central = dark[:, int(width * 0.01) : int(width * 0.99)]
+    h_window = max(80, int(central.shape[1] * 0.24))
+    h_sum = np.pad(central.astype(np.int32), ((0, 0), (1, 0))).cumsum(axis=1)
+    horizontal_score = (
+        h_sum[:, h_window:] - h_sum[:, :-h_window]
+    ).max(axis=1) / h_window
+    horizontal = _cluster_axis(
+        np.flatnonzero(horizontal_score >= 0.60),
+        height,
+        merge_distance=0.004,
+    )
+    # Keep boundaries in the main document body and remove near-duplicates.
+    horizontal = [value for value in horizontal if 0.005 <= value <= 0.995]
+    if len(horizontal) < 5:
+        return None
+    table_top, table_bottom = horizontal[0], horizontal[-1]
+    y0, y1 = int(table_top * height), max(int(table_bottom * height), 1)
+    table_dark = dark[y0:y1, :]
+    v_window = max(80, int(table_dark.shape[0] * 0.24))
+    v_sum = np.pad(table_dark.astype(np.int32), ((1, 0), (0, 0))).cumsum(axis=0)
+    vertical_score = (
+        v_sum[v_window:, :] - v_sum[:-v_window, :]
+    ).max(axis=0) / v_window
+    vertical = _cluster_axis(
+        np.flatnonzero(vertical_score >= 0.60),
+        width,
+        merge_distance=0.015,
+    )
+    vertical = [value for value in vertical if 0.002 <= value <= 0.998]
+    if len(vertical) < 5:
+        return None
+    # The common Arabic roster structure is notes | rank | name | sequence.
+    # Use only detected rules; never infer a name column from OCR text proximity.
+    notes_right = vertical[-4]
+    name_left = vertical[-3]
+    name_right = vertical[-2]
+    if not (0.04 <= name_right - name_left <= 0.36):
+        return None
+    return TableGrid(
+        row_boundaries=tuple(horizontal),
+        vertical_lines=tuple(vertical),
+        name_left=name_left,
+        name_right=name_right,
+        notes_right=notes_right,
+    )
+
+
+def _cell_text_options(tokens: list[OcrToken]) -> list[tuple[str, float, int]]:
+    options: list[tuple[str, float, int]] = []
+    for token in tokens:
+        cleaned = _clean_name(token.text)
+        if _is_name_token(cleaned):
+            options.append((cleaned, token.confidence, token.agreement))
+    for line in _cluster_rows(tokens, y_tol=0.01):
+        ordered = sorted(line, key=lambda token: -token.x)
+        combined = _clean_name(" ".join(token.text for token in ordered))
+        if _is_name_token(combined):
+            options.append(
+                (
+                    combined,
+                    sum(token.confidence for token in ordered) / len(ordered),
+                    min(token.agreement for token in ordered),
+                )
+            )
+    return options
+
+
+def _geometric_rows(
+    tokens: list[OcrToken], grid: Optional[TableGrid]
+) -> list[tuple[list[OcrToken], Optional[tuple[float, float]], float]]:
+    if grid:
+        rows: list[tuple[list[OcrToken], Optional[tuple[float, float]], float]] = []
+        for top, bottom in zip(grid.row_boundaries, grid.row_boundaries[1:]):
+            if bottom - top < 0.004 or bottom - top > 0.22:
+                continue
+            members = [token for token in tokens if top <= token.cy < bottom]
+            if not members:
+                continue
+            name_centers: list[float] = []
+            for token in sorted(
+                (
+                    item
+                    for item in members
+                    if grid.name_left <= item.cx <= grid.name_right
+                    and re.search(r"[\u0600-\u06FF]", item.text)
+                ),
+                key=lambda item: item.cy,
+            ):
+                if not name_centers or abs(token.cy - name_centers[-1]) > 0.014:
+                    name_centers.append(token.cy)
+                else:
+                    name_centers[-1] = (name_centers[-1] + token.cy) / 2
+            if len(name_centers) <= 1:
+                rows.append((members, (top, bottom), 0.98))
+                continue
+            # A missed/faint horizontal rule left multiple name baselines in
+            # one geometric span. Split at their midpoints and lower the row
+            # association confidence so dates still require corroboration.
+            cuts = [top] + [
+                (left + right) / 2
+                for left, right in zip(name_centers, name_centers[1:])
+            ] + [bottom]
+            for sub_top, sub_bottom in zip(cuts, cuts[1:]):
+                subset = [
+                    token for token in members if sub_top <= token.cy < sub_bottom
+                ]
+                if subset:
+                    rows.append((subset, (sub_top, sub_bottom), 0.86))
+        if rows:
+            return rows
+    return [(row, None, 0.68) for row in _cluster_rows(tokens)]
+
+
+def parse_page_tokens(
+    tokens: list[OcrToken],
+    page_num: int,
+    *,
+    grid: Optional[TableGrid] = None,
+    image_path: Optional[Path] = None,
+) -> list[dict]:
+    rows_out: list[dict] = []
+    for idx, (row_tokens, span, association_confidence) in enumerate(
+        _geometric_rows(tokens, grid)
+    ):
+        joined = " ".join(token.text for token in row_tokens)
         if _HEADER_RE.search(joined) and not _DATE_RE.search(joined):
             continue
 
-        name_toks: list[OcrToken] = []
-        rank = ""
-        other_toks: list[OcrToken] = []
+        if grid:
+            name_tokens = [
+                token
+                for token in row_tokens
+                if grid.name_left <= token.cx <= grid.name_right
+                and not _DATE_RE.search(token.text)
+            ]
+            rank_tokens = [
+                token
+                for token in row_tokens
+                if grid.notes_right <= token.cx < grid.name_left
+            ]
+            notes_tokens = [
+                token for token in row_tokens if token.cx < grid.notes_right
+            ]
+        else:
+            name_tokens = [
+                token
+                for token in row_tokens
+                if token.cx >= 0.64 and not _DATE_RE.search(token.text)
+            ]
+            rank_tokens = [token for token in row_tokens if _is_rank(token.text)]
+            # Fallback association is intentionally low-confidence.
+            name_edge = min((token.x for token in name_tokens), default=0.64)
+            notes_tokens = [token for token in row_tokens if token.x < name_edge - 0.02]
 
-        for t in row_tokens:
-            txt = t.text.strip()
-            if not txt:
-                continue
-            if _is_rank(txt):
-                if not rank:
-                    rank = normalize_arabic_name(txt)
-                continue
-            if _SEQ_RE.match(txt.replace(" ", "")):
-                continue
-            if _is_name_token(txt) and t.x >= 0.52 and not _DATE_RE.search(txt):
-                name_toks.append(t)
-            elif t.x >= 0.70 and re.search(r"[\u0600-\u06FF]", txt) and not _DATE_RE.search(txt):
-                # rightmost fragments may be name pieces
-                if _is_name_token(_clean_name(txt)) or len(txt) >= 4:
-                    name_toks.append(t)
-                else:
-                    other_toks.append(t)
-            else:
-                other_toks.append(t)
-
-        name_toks_sorted = sorted(name_toks, key=lambda t: -t.x)
-        candidate = ""
-        name_x_min = 1.0
-        for t in name_toks_sorted:
-            cleaned = _clean_name(t.text)
-            if _is_name_token(cleaned) and 2 <= len(cleaned.split()) <= 5:
-                if len(cleaned) > len(candidate):
-                    candidate = cleaned
-                    name_x_min = min(name_x_min, t.x)
-
-        if not candidate:
+        options = _cell_text_options(name_tokens)
+        if not options:
             continue
+        candidate, name_confidence, name_agreement = max(
+            options,
+            key=lambda item: (
+                item[2],
+                item[1],
+                2 <= len(item[0].split()) <= 5,
+                len(item[0]),
+            ),
+        )
+        rank = next(
+            (normalize_arabic_name(token.text) for token in rank_tokens if _is_rank(token.text)),
+            "",
+        )
+        notes_tokens = sorted(notes_tokens, key=lambda token: (token.cy, -token.x))
+        notes = " ".join(token.text.strip() for token in notes_tokens if token.text.strip())
+        date_tokens = [token for token in notes_tokens if _DATE_RE.search(token.text)]
+        if date_tokens:
+            token_confidence = sum(token.confidence for token in date_tokens) / len(date_tokens)
+            date_agreement = min(token.agreement for token in date_tokens)
+        else:
+            token_confidence = 0.0
+            date_agreement = 0
+        confidence = min(association_confidence, token_confidence or name_confidence)
+        if date_agreement >= 2 and association_confidence >= 0.95:
+            confidence = min(0.99, confidence + 0.04)
 
-        # Notes = tokens to the LEFT of the name column (lower x), plus any
-        # same-row tokens that contain date patterns. Never fall back to the
-        # full row join (that can import a neighbor's dates).
-        notes_parts: list[str] = []
-        for t in sorted(other_toks, key=lambda t: -t.x):
-            txt = t.text.strip()
-            has_date = bool(_DATE_RE.search(txt))
-            left_of_name = t.x < (name_x_min - 0.02) if name_x_min < 1.0 else t.x < 0.62
-            # Exclude other person-name-like tokens from notes
-            if _is_name_token(_clean_name(txt)) and not has_date:
-                continue
-            if has_date or left_of_name:
-                notes_parts.append(txt)
-
-        notes = " ".join(notes_parts)
-        if not notes:
-            # last resort: only date-bearing tokens from the row
-            notes = " ".join(
-                t.text for t in row_tokens if _DATE_RE.search(t.text or "")
+        source_bbox = None
+        source_image = ""
+        if span and image_path:
+            top, bottom = span
+            source_bbox = {"x": 0.0, "top": top, "w": 1.0, "h": bottom - top}
+            source_image = save_region_crop(
+                image_path,
+                x=0.0,
+                top=top,
+                w=1.0,
+                h=bottom - top,
+                prefix=f"master_p{page_num}_r{idx}",
+                padding=0.002,
             )
-
-        dates = extract_all_dates(notes, page=page_num, person_name=candidate)
-        conf = 0.93 if dates else 0.80
-        if len(candidate.split()) >= 3:
-            conf = min(0.98, conf + 0.03)
-        # Too many dates on one row often means row bleed from neighbors
-        if len(dates) >= 10:
-            conf = min(conf, 0.72)
-
         rows_out.append(
             {
                 "original_name": candidate,
@@ -210,44 +350,35 @@ def parse_page_tokens(tokens: list[OcrToken], page_num: int) -> list[dict]:
                 "notes": notes,
                 "page": page_num,
                 "row_index": idx,
-                "confidence": conf,
+                "confidence": confidence,
+                "name_confidence": name_confidence,
+                "ocr_agreement": min(name_agreement, date_agreement) if date_tokens else name_agreement,
+                "row_association_confidence": association_confidence,
+                "source_bbox": source_bbox,
+                "source_image": source_image,
             }
         )
-
-    # Prefer best notes per normalized name on page
-    best: dict[str, dict] = {}
-    for row in rows_out:
-        key = make_master_key(row["original_name"])
-        dc = len(extract_all_dates(row["notes"], page=page_num))
-        prev = best.get(key)
-        prev_dc = len(extract_all_dates(prev["notes"], page=page_num)) if prev else -1
-        if key not in best or dc > prev_dc:
-            best[key] = row
-    return list(best.values())
+    return rows_out
 
 
 def extract_master_pdf(pdf_path: Path) -> dict[str, MasterPerson]:
     """Process the ENTIRE master PDF; merge all occurrences per person."""
     page_images = render_pdf_pages(pdf_path)
     people: dict[str, MasterPerson] = {}
-    all_dates_acc = []
     try:
         for page_idx, img_path in enumerate(page_images):
             page_num = page_idx + 1
-            # Dual OCR: preprocessed + raw for better name recall
-            tokens = ocr_image(img_path, preprocess=True)
-            tokens_raw = ocr_image(img_path, preprocess=False)
-            # merge unique tokens by text+approx position
-            seen_keys = set()
-            merged: list[OcrToken] = []
-            for t in tokens + tokens_raw:
-                k = (round(t.x, 2), round(t.y, 2), t.text.strip()[:40])
-                if k in seen_keys:
-                    continue
-                seen_keys.add(k)
-                merged.append(t)
-
-            rows = parse_page_tokens(merged, page_num)
+            # Three independent image passes are fused with disagreement kept
+            # as evidence. A page failure aborts the run instead of silently
+            # pretending that the entire PDF was searched.
+            tokens = ocr_consensus(img_path)
+            grid = detect_table_grid(img_path)
+            rows = parse_page_tokens(
+                tokens,
+                page_num,
+                grid=grid,
+                image_path=img_path,
+            )
 
             for row in rows:
                 key = make_master_key(row["original_name"])
@@ -264,53 +395,15 @@ def extract_master_pdf(pdf_path: Path) -> dict[str, MasterPerson]:
                     rank_title=row.get("rank") or "",
                     row_index=row["row_index"],
                     date_confidence=row["confidence"],
+                    source_image=row.get("source_image") or "",
+                    source_bbox=row.get("source_bbox"),
+                    name_confidence=row.get("name_confidence") or 0.0,
+                    ocr_agreement=row.get("ocr_agreement") or 1,
+                    row_association_confidence=row.get("row_association_confidence") or 0.0,
                 )
 
-            # Standalone name tokens on the right with nearby notes
-            for t in merged:
-                if t.x < 0.55 or not _is_name_token(t.text):
-                    continue
-                name = _clean_name(t.text)
-                key = make_master_key(name)
-                if key in people:
-                    continue
-                nearby = [
-                    t2.text
-                    for t2 in merged
-                    if abs(t2.cy - t.cy) <= 0.02
-                    and (_DATE_RE.search(t2.text) or t2.x < 0.6)
-                ]
-                notes = " ".join(nearby)
-                people[key] = MasterPerson(original_name=name, normalized_name=key)
-                if extract_all_dates(notes, page=page_num):
-                    people[key].add_occurrence(
-                        page=page_num, notes=notes, date_confidence=0.85
-                    )
-                else:
-                    if page_num not in people[key].pages:
-                        people[key].pages.append(page_num)
-
-        # Document-level year sanity
-        for p in people.values():
-            all_dates_acc.extend(p.dates)
-        hint = document_year_hint(all_dates_acc)
-        if hint:
-            for p in people.values():
-                p.dates = revalidate_dates_with_hint(p.dates, hint)
-
-        # Merge near-duplicate OCR identities (soft-normalized key)
+        # Similar readings are flagged as aliases, never auto-merged.
         people = _merge_near_duplicate_people(people)
-        # Flag persons with suspiciously many unique dates (row bleed)
-        for p in people.values():
-            uniq = {d.normalized.iso() for d in p.dates}
-            if len(uniq) >= 12:
-                for d in p.dates:
-                    d.needs_review = True
-                    d.verified = False
-                    if not d.review_reason:
-                        d.review_reason = (
-                            "عدد تواريخ مرتفع — راجع ارتباط الصف/الملاحظات"
-                        )
     finally:
         for p in page_images:
             try:
@@ -325,67 +418,24 @@ def _merge_near_duplicate_people(
     people: dict[str, MasterPerson],
 ) -> dict[str, MasterPerson]:
     """
-    Merge records that only differ by OCR noise when soft-normalized forms
-    collide, or first+last name soft keys collide with high similarity.
-    Prefer the name with more dates/notes.
+    Preserve every distinct conservative identity key.
+
+    Near-duplicate OCR readings are only cross-referenced for review. Merging
+    them automatically can combine two real people and is more dangerous than
+    leaving a duplicate candidate visible.
     """
-    from .normalize import name_similarity, soft_normalize_for_fuzzy
+    from .normalize import name_similarity
 
     items = list(people.values())
-    used = set()
-    groups: list[list[MasterPerson]] = []
-
-    for i, p in enumerate(items):
-        if i in used:
-            continue
-        group = [p]
-        used.add(i)
-        sp = soft_normalize_for_fuzzy(p.original_name)
-        tp = sp.split()
-        for j, q in enumerate(items):
-            if j in used:
+    for index, person in enumerate(items):
+        for other in items[index + 1 :]:
+            similarity = name_similarity(person.original_name, other.original_name)
+            if similarity < 0.88:
                 continue
-            sq = soft_normalize_for_fuzzy(q.original_name)
-            if sp == sq:
-                group.append(q)
-                used.add(j)
-                continue
-            tq = sq.split()
-            sim = name_similarity(p.original_name, q.original_name)
-            # first+last soft match (allow tiny OCR drift on family name)
-            if (
-                len(tp) >= 2
-                and len(tq) >= 2
-                and tp[0] == tq[0]
-                and sim >= 0.86
-            ):
-                group.append(q)
-                used.add(j)
-                continue
-            # high overall similarity alone
-            if sim >= 0.92:
-                group.append(q)
-                used.add(j)
-        groups.append(group)
-
-    merged: dict[str, MasterPerson] = {}
-    for group in groups:
-        group.sort(
-            key=lambda p: (len(p.dates), len(p.notes_texts), len(p.original_name)),
-            reverse=True,
-        )
-        primary = group[0]
-        for other in group[1:]:
-            for notes in other.notes_texts:
-                if notes not in primary.notes_texts:
-                    primary.notes_texts.append(notes)
-            for d in other.dates:
-                if not any(x.normalized.iso() == d.normalized.iso() for x in primary.dates):
-                    primary.dates.append(d)
-            for page in other.pages:
-                if page not in primary.pages:
-                    primary.pages.append(page)
-            if other.rank_title and not primary.rank_title:
-                primary.rank_title = other.rank_title
-        merged[primary.normalized_name] = primary
-    return merged
+            person.identity_needs_review = True
+            other.identity_needs_review = True
+            if other.original_name not in person.aliases:
+                person.aliases.append(other.original_name)
+            if person.original_name not in other.aliases:
+                other.aliases.append(person.original_name)
+    return people

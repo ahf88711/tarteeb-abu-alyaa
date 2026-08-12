@@ -16,7 +16,7 @@ from .merge_master import (
     rename_master_person,
 )
 from .models import NameStatus, SessionState, make_master_key
-from .ranking import RankPerson, rank_people, summarize_results
+from .ranking import RankPerson, RankStatus, rank_people, summarize_results
 
 
 def new_session() -> SessionState:
@@ -278,7 +278,7 @@ def add_manual_target_names(session: SessionState, names: list[str]) -> SessionS
 
 
 def auto_confirm_high_confidence(
-    session: SessionState, *, min_confidence: float = 0.92
+    session: SessionState, *, min_confidence: float = 0.97
 ) -> SessionState:
     """
     Confirm only high-confidence / exact master matches.
@@ -298,13 +298,19 @@ def auto_confirm_high_confidence(
             and t.confidence >= min_confidence
             and t.status != NameStatus.NOT_IN_MASTER
         ):
+            bbox = t.bbox or {}
+            if bbox and (
+                float(bbox.get("visual_confidence") or 0) < 0.90
+                or int(bbox.get("ocr_agreement") or 0) < 2
+            ):
+                continue
             # require clear winner: top candidate gap
             cands = t.candidates or []
             if len(cands) >= 2:
                 gap = float(cands[0].get("confidence", 0)) - float(
                     cands[1].get("confidence", 0)
                 )
-                if gap < 0.08:
+                if gap < 0.10:
                     continue  # too close — human review
             corrections.append(
                 {"id": t.id, "action": "set_name", "name": t.matched_master_name}
@@ -407,7 +413,12 @@ def bulk_verify_safe_dates(session: SessionState) -> SessionState:
     n = 0
     for person in session.master_people.values():
         for d in person.dates:
-            if not d.needs_review and d.confidence >= 0.85:
+            if (
+                not d.needs_review
+                and d.confidence >= 0.93
+                and d.ocr_agreement >= 2
+                and d.row_association_confidence >= 0.95
+            ):
                 if not d.verified:
                     d.verified = True
                     n += 1
@@ -441,6 +452,7 @@ def apply_date_reviews(session: SessionState, reviews: list[dict]) -> SessionSta
             for d in person.dates:
                 d.verified = True
                 d.needs_review = False
+                d.review_reason = "اعتماد صريح من المستخدم"
         elif action == "verify_date":
             iso = r.get("date")
             for d in person.dates:
@@ -474,7 +486,7 @@ def apply_date_reviews(session: SessionState, reviews: list[dict]) -> SessionSta
     return session
 
 
-def run_ranking(session: SessionState, *, auto_verify_dates: bool = True) -> SessionState:
+def run_ranking(session: SessionState, *, auto_verify_dates: bool = False) -> SessionState:
     """
     Deterministic ranking of VERIFIED target names only.
     """
@@ -482,6 +494,7 @@ def run_ranking(session: SessionState, *, auto_verify_dates: bool = True) -> Ses
     skipped_review = 0
     not_found = 0
     seen_master_keys: set[str] = set()
+    blocked_by_dates: dict[str, dict] = {}
 
     for t in session.target_names:
         if t.status in (NameStatus.NEEDS_REVIEW, NameStatus.AMBIGUOUS):
@@ -532,11 +545,30 @@ def run_ranking(session: SessionState, *, auto_verify_dates: bool = True) -> Ses
                 # Never auto-verify dates flagged for review / low confidence
                 if d.needs_review:
                     d.verified = False
-                elif d.confidence >= 0.85:
+                elif (
+                    d.confidence >= 0.93
+                    and d.ocr_agreement >= 2
+                    and d.row_association_confidence >= 0.95
+                ):
                     d.verified = True
 
         dates = unique_dates_newest_first(master.dates, only_verified=True)
-        pending_review = sum(1 for d in master.dates if d.needs_review)
+        pending_review = sum(1 for d in master.dates if not d.verified)
+        verified_keys = {date.iso() for date in dates}
+        material_pending = [
+            date
+            for date in master.dates
+            if not date.verified and date.normalized.iso() not in verified_keys
+        ]
+        if material_pending:
+            blocked_by_dates[t.id] = {
+                "name": master.original_name,
+                "count": len(material_pending),
+                "pages": sorted({date.page for date in material_pending}),
+                "dates": [date.to_dict() for date in material_pending],
+            }
+            skipped_review += 1
+            continue
         rank_people_list.append(
             RankPerson(
                 id=t.id,
@@ -577,7 +609,15 @@ def run_ranking(session: SessionState, *, auto_verify_dates: bool = True) -> Ses
     for t in session.target_names:
         if any(r["id"] == t.id for r in session.ranking_results):
             continue
-        status = t.status.value
+        date_block = blocked_by_dates.get(t.id)
+        status = RankStatus.NEEDS_REVIEW.value if date_block else t.status.value
+        if date_block:
+            explanation = (
+                f"أُوقف ترتيب هذا الشخص لأن {date_block['count']} تاريخًا فريدًا غير معتمد "
+                "قد يغيّر مفتاح الترتيب. يجب مراجعة التواريخ أولًا."
+            )
+        else:
+            explanation = "لم يُدرَج في الترتيب بسبب حالة الاسم أو غياب التواريخ."
         session.ranking_results.append(
             {
                 "rank": None,
@@ -585,11 +625,12 @@ def run_ranking(session: SessionState, *, auto_verify_dates: bool = True) -> Ses
                 "original_name": t.display_name,
                 "normalized_name": t.normalized_name,
                 "status": status,
-                "explanation": "لم يُدرَج في الترتيب بسبب حالة الاسم أو غياب التواريخ.",
+                "explanation": explanation,
                 "dates": [],
                 "date_count": 0,
                 "latest_date": None,
                 "previous_date": None,
+                "meta": {"pending_dates": date_block.get("dates", [])} if date_block else {},
             }
         )
 
@@ -600,6 +641,7 @@ def run_ranking(session: SessionState, *, auto_verify_dates: bool = True) -> Ses
         "skipped_needs_review": skipped_review,
         "not_found": not_found,
         "ranked_candidates": len(rank_people_list),
+        "blocked_by_pending_dates": len(blocked_by_dates),
     }
     session.phase = "ranked"
     session.messages.append(

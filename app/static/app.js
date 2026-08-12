@@ -497,6 +497,7 @@
           .join("");
         return `
         <div class="review-card ${amb ? "ambiguous" : needs ? "needs" : ""}" data-id="${t.id}">
+          ${t.crop_path ? `<img src="${escapeHtml(t.crop_path)}" alt="قصاصة الاسم من المصدر" loading="lazy" style="max-width:100%;max-height:110px;border:1px solid var(--border);border-radius:8px;margin-bottom:.5rem" />` : ""}
           <div><strong>${escapeHtml(t.original_name)}</strong> ${badge(t.status)}</div>
           <div class="muted">OCR: ${escapeHtml(t.ocr_raw || t.original_name)} · الثقة: ${Math.round(
           (t.confidence || 0) * 100
@@ -530,7 +531,7 @@
           }
           <div class="btn-row">
             <label class="muted"><input type="checkbox" class="confirm-cb" ${
-              t.status === "مؤكد" || (t.matched_master_name && t.confidence >= 0.8)
+              t.status === "مؤكد"
                 ? "checked"
                 : ""
             } /> تأكيد هذا الاسم للترتيب</label>
@@ -553,7 +554,7 @@
         const hasMatch = (card.querySelector(".name-input")?.value || "").trim().length > 0;
         const m = confText.match(/الثقة:\s*(\d+)/);
         const conf = m ? Number(m[1]) : 0;
-        card.querySelector(".confirm-cb").checked = hasMatch && conf >= 70;
+        card.querySelector(".confirm-cb").checked = hasMatch && conf >= 97;
       });
     };
     bar.querySelector("#btnSelectNone").onclick = () => {
@@ -577,7 +578,7 @@
       const data = await api("/api/names/auto_confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: sessionId, min_confidence: 0.92 }),
+        body: JSON.stringify({ session_id: sessionId, min_confidence: 0.97 }),
       });
       renderNames(data.target_names || []);
       setStatus(data.messages?.slice(-1)[0] || "تم التأكيد الحذر.");
@@ -695,7 +696,7 @@
     const data = await api("/api/rank", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: sessionId, auto_verify_dates: true }),
+      body: JSON.stringify({ session_id: sessionId, auto_verify_dates: false }),
     });
     renderResults(data.results || [], data.summary || {});
     $("panel-results").classList.remove("hidden");
@@ -901,7 +902,7 @@
         .map(
           (r, idx) => `
       <tr data-name="${escapeHtml(r.original_name || "")}">
-        <td>${r.rank ?? "—"}</td>
+        <td>${escapeHtml(r.rank_display || r.rank || "—")}</td>
         <td>
           <strong>${escapeHtml(r.original_name || "")}</strong>
           <div><button type="button" class="btn btn-outline" data-detail="${idx}">تفاصيل</button></div>
@@ -929,7 +930,7 @@
           return `
         <article class="result-card" data-name="${escapeHtml(r.original_name || "")}">
           <div>
-            <span class="rank-num">#${r.rank ?? "—"}</span>
+            <span class="rank-num">#${escapeHtml(r.rank_display || r.rank || "—")}</span>
             ${badge(r.status)}
           </div>
           <div class="card-title">${escapeHtml(r.original_name || "")}</div>
@@ -1000,9 +1001,9 @@
     const allDates = ((r.meta && r.meta.all_dates) || [])
       .map(
         (d) =>
-          `<li>${escapeHtml(d.display || d.normalized_date)} — ص ${d.page ?? "؟"} — ثقة ${Math.round(
+          `<li>${d.source_image ? `<img src="${escapeHtml(d.source_image)}" alt="صف المصدر" loading="lazy" style="display:block;max-width:100%;max-height:150px;border:1px solid var(--border);border-radius:8px;margin:.35rem 0" />` : ""}${escapeHtml(d.display || d.normalized_date)} — ص ${d.page ?? "؟"} — ثقة ${Math.round(
             (d.confidence || 0) * 100
-          )}% ${d.needs_review ? "⚠ مراجعة" : ""} <span class="muted">${escapeHtml(
+          )}% — اتفاق OCR: ${d.ocr_agreement ?? 1} — ارتباط الصف: ${Math.round((d.row_association_confidence || 0) * 100)}% ${d.needs_review ? "⚠ مراجعة" : ""} <span class="muted">${escapeHtml(
             d.original_text || ""
           )}</span></li>`
       )
@@ -1014,7 +1015,7 @@
     $("detailBox").innerHTML = `
       <div class="review-card">
         <div><strong>${escapeHtml(r.original_name || "")}</strong> ${badge(r.status)} — ترتيب #${
-      r.rank ?? "—"
+      escapeHtml(r.rank_display || r.rank || "—")
     }</div>
         <p class="explanation">${escapeHtml(r.explanation || "")}</p>
         <h4 style="margin:0.6rem 0 0.3rem;color:var(--primary)">مفتاح الترتيب (الأحدث ← الأقدم)</h4>

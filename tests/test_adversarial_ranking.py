@@ -212,7 +212,13 @@ class TestDateParsingIntegrity:
         assert parse_hijri_date("15/08/1447") == HijriDate(1447, 8, 15)
 
     def test_ocr_five_digit_year(self):
-        assert parse_hijri_date("11447/08/15") == HijriDate(1447, 8, 15)
+        # Direct/manual entry must never be silently corrected.
+        assert parse_hijri_date("11447/08/15") is None
+
+    def test_ocr_five_digit_year_is_review_only_when_extracted(self):
+        dates = extract_all_dates("11447/08/15", confidence=0.98, ocr_agreement=2)
+        assert dates[0].normalized == HijriDate(1447, 8, 15)
+        assert dates[0].needs_review and not dates[0].verified
 
     def test_extract_dedupes(self):
         text = "من 1447/08/10 ومرة أخرى 1447/08/10 ثم 1447/07/01"
