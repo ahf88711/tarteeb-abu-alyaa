@@ -117,46 +117,6 @@ class TableGrid:
     notes_right: float
 
 
-def crop_table_for_ocr(
-    image_path: Path, grid: TableGrid, *, padding: float = 0.008
-) -> tuple[Path, TableGrid]:
-    """Crop non-table page furniture and remap the grid to the new raster."""
-    left = max(0.0, min(grid.vertical_lines) - padding)
-    right = min(1.0, max(grid.vertical_lines) + padding)
-    top = max(0.0, min(grid.row_boundaries) - padding)
-    bottom = min(1.0, max(grid.row_boundaries) + padding)
-    width_fraction = right - left
-    height_fraction = bottom - top
-    if width_fraction <= 0.25 or height_fraction <= 0.25:
-        raise ValueError("حدود الجدول المكتشفة غير صالحة للقص")
-
-    with Image.open(image_path) as source:
-        image = ImageOps.exif_transpose(source.convert("RGB"))
-        x0 = max(0, int(left * image.width))
-        x1 = min(image.width, max(x0 + 1, int(right * image.width + 0.999)))
-        y0 = max(0, int(top * image.height))
-        y1 = min(image.height, max(y0 + 1, int(bottom * image.height + 0.999)))
-        destination = Path(
-            tempfile.mkstemp(prefix="master_table_", suffix=".png")[1]
-        )
-        image.crop((x0, y0, x1, y1)).save(destination, "PNG")
-
-    def remap_x(value: float) -> float:
-        return max(0.0, min(1.0, (value - left) / width_fraction))
-
-    def remap_y(value: float) -> float:
-        return max(0.0, min(1.0, (value - top) / height_fraction))
-
-    cropped_grid = TableGrid(
-        row_boundaries=tuple(remap_y(value) for value in grid.row_boundaries),
-        vertical_lines=tuple(remap_x(value) for value in grid.vertical_lines),
-        name_left=remap_x(grid.name_left),
-        name_right=remap_x(grid.name_right),
-        notes_right=remap_x(grid.notes_right),
-    )
-    return destination, cropped_grid
-
-
 def _cluster_axis(
     indices: np.ndarray, size: int, *, merge_distance: float = 0.006
 ) -> list[float]:
@@ -463,22 +423,17 @@ def extract_master_pdf(pdf_path: Path) -> dict[str, MasterPerson]:
             # as evidence. A page failure aborts the run instead of silently
             # pretending that the entire PDF was searched.
             grid = detect_table_grid(img_path)
-            ocr_path = img_path
-            remove_ocr_path = False
-            if grid is not None:
-                ocr_path, grid = crop_table_for_ocr(img_path, grid)
-                remove_ocr_path = True
-            try:
-                tokens = ocr_consensus(ocr_path)
-                rows = parse_page_tokens(
-                    tokens,
-                    page_num,
-                    grid=grid,
-                    image_path=ocr_path,
-                )
-            finally:
-                if remove_ocr_path:
-                    ocr_path.unlink(missing_ok=True)
+            # Keep the complete page for OCR. Cropping to the detected table
+            # looked attractive as a speed optimization, but real Linux OCR
+            # tests proved that it removed context Tesseract needs to retain
+            # dates in the notes column. Accuracy takes priority here.
+            tokens = ocr_consensus(img_path)
+            rows = parse_page_tokens(
+                tokens,
+                page_num,
+                grid=grid,
+                image_path=img_path,
+            )
 
             for row in rows:
                 key = make_master_key(row["original_name"])
