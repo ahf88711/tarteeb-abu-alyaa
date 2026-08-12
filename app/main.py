@@ -246,7 +246,7 @@ def progress(session_id: str):
 
 
 @app.post("/api/upload/master")
-async def upload_master(session_id: str, file: UploadFile = File(...)):
+def upload_master(session_id: str, file: UploadFile = File(...)):
     s = _session(session_id)
     if not file.filename:
         raise HTTPException(400, detail="الملف مطلوب.")
@@ -285,7 +285,7 @@ async def upload_master(session_id: str, file: UploadFile = File(...)):
 
 
 @app.post("/api/upload/master/multi")
-async def upload_master_multi(
+def upload_master_multi(
     session_id: str, files: List[UploadFile] = File(...)
 ):
     """Upload multiple master PDFs/Excel files and merge into one index."""
@@ -339,7 +339,7 @@ def _image_to_pdf(image_path: Path, session_id: str, idx: int) -> Path:
 
 
 @app.post("/api/upload/targets")
-async def upload_targets(session_id: str, file: UploadFile = File(...)):
+def upload_targets(session_id: str, file: UploadFile = File(...)):
     s = _session(session_id)
     if not file.filename:
         raise HTTPException(400, detail="الملف مطلوب.")
@@ -361,7 +361,7 @@ async def upload_targets(session_id: str, file: UploadFile = File(...)):
 
 
 @app.post("/api/upload/targets/multi")
-async def upload_targets_multi(
+def upload_targets_multi(
     session_id: str, files: List[UploadFile] = File(...)
 ):
     """Multiple target lists (images/PDFs/Excel) merged into one candidate set."""
