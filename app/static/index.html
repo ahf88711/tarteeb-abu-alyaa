@@ -13,195 +13,82 @@
   <header class="header">
     <div class="container">
       <h1>ترتيب أبو علياء</h1>
-      <p class="header-sub">ترتيب حسب السجلات التاريخية — بلا تخمين · مناسب للجوال وسطح المكتب</p>
+      <p class="header-sub">ارفع قائمتين فقط، وستظهر نتيجة ترتيب أسماء القائمة الثانية تحتها</p>
     </div>
   </header>
 
-  <main class="container main-pad">
-    <div class="steps" id="steps" role="tablist">
-      <span class="step-pill active" data-step="1">1. رفع</span>
-      <span class="step-pill" data-step="2">2. أسماء</span>
-      <span class="step-pill" data-step="3">3. تواريخ</span>
-      <span class="step-pill" data-step="4">4. ترتيب</span>
-    </div>
-
-    <div id="status" class="status-bar" role="status">
-      ابدأ بـ «تشغيل كامل» للتجربة، أو ارفع الملفات من الأزرار بالأسفل.
-    </div>
-
-    <!-- Step 1: Upload -->
-    <section class="card" id="panel-upload">
-      <h2>رفع الملفات</h2>
-      <p class="hint mobile-short">
-        <strong>رئيسي:</strong> PDF/Excel/صور السراء ·
-        <strong>قائمة:</strong> أسماء المطلوب ترتيبهم فقط
+  <main class="container simple-main">
+    <section class="card simple-upload-card" aria-labelledby="upload-title">
+      <h2 id="upload-title">رفع القائمتين</h2>
+      <p class="simple-intro">
+        يستخرج النظام الأسماء والتواريخ من القائمة الأولى، ثم يرتّب فقط الأشخاص الموجودين في القائمة الثانية.
       </p>
 
-      <div class="primary-actions">
-        <button class="btn btn-accent btn-lg btn-block" id="btnFullRank">▶ تشغيل كامل حتى النتيجة</button>
+      <form id="rankForm">
+        <div class="grid-2 upload-grid">
+          <article class="upload-box simple-upload-box">
+            <span class="choice-number" aria-hidden="true">١</span>
+            <label class="file-label" for="masterFile">قائمة الأسماء والتواريخ</label>
+            <p class="muted">السجل الأساسي الذي يحتوي أسماء الأشخاص وتواريخهم.</p>
+            <input
+              type="file"
+              id="masterFile"
+              accept=".pdf,.png,.jpg,.jpeg,.heic,.heif,application/pdf,image/*"
+              multiple
+              required
+            />
+            <div class="file-selection" id="masterInfo">صورة أو PDF — ويمكن اختيار عدة صفحات.</div>
+          </article>
+
+          <article class="upload-box simple-upload-box">
+            <span class="choice-number" aria-hidden="true">٢</span>
+            <label class="file-label" for="targetFile">قائمة الأسماء المراد ترتيبهم فقط</label>
+            <p class="muted">لن تظهر في النتيجة أسماء غير موجودة في هذه القائمة.</p>
+            <input
+              type="file"
+              id="targetFile"
+              accept=".pdf,.png,.jpg,.jpeg,.heic,.heif,application/pdf,image/*"
+              multiple
+              required
+            />
+            <div class="file-selection" id="targetInfo">صورة أو PDF — ويمكن اختيار عدة صفحات.</div>
+          </article>
+        </div>
+
+        <button class="btn btn-accent btn-lg btn-block simple-run" id="btnRankFiles" type="submit">
+          استخراج وترتيب الأسماء
+        </button>
+      </form>
+
+      <div id="status" class="status-bar simple-status" role="status" aria-live="polite">
+        اختر القائمتين ثم اضغط «استخراج وترتيب الأسماء».
       </div>
-
-      <details class="adv-block">
-        <summary>تجارب إضافية</summary>
-        <div class="btn-row">
-          <button class="btn btn-warn" id="btnDemo">تجربة PDF ممسوح</button>
-          <button class="btn btn-outline" id="btnDemoExcel">تجربة Excel نظيف</button>
-        </div>
-      </details>
-
-      <div class="grid-2 upload-grid">
-        <div class="upload-box">
-          <label class="file-label">الملف الرئيسي
-            <input type="file" id="masterFile" accept=".pdf,.xlsx,.xlsm,.png,.jpg,.jpeg,.heic,.heif,application/pdf,image/*" multiple />
-          </label>
-          <button class="btn btn-primary btn-block" id="btnMaster">رفع / دمج الرئيسي</button>
-          <p class="muted" id="masterInfo">يمكن اختيار عدة ملفات أو صور صفحات.</p>
-        </div>
-        <div class="upload-box">
-          <label class="file-label">قائمة الأسماء
-            <input type="file" id="targetFile" accept=".pdf,.png,.jpg,.jpeg,.heic,.heif,.xlsx,.xlsm,image/*" multiple />
-          </label>
-          <button class="btn btn-primary btn-block" id="btnTargets" disabled>استخراج الأسماء</button>
-          <p class="muted" id="targetInfo">صورة، PDF، أو Excel بعمود «الاسم».</p>
-        </div>
-      </div>
-
-      <details class="adv-block">
-        <summary>خيارات متقدمة (مجلد / إدخال يدوي / سحب)</summary>
-        <label class="file-label">مسار مجلد محلي
-          <input type="text" id="masterFolder" class="text-input" placeholder="/Users/…/مجلد_الصفحات" />
-        </label>
-        <button class="btn btn-outline btn-block" id="btnFolder" disabled>دمج كل ملفات المجلد</button>
-        <h3>أسماء يدوية (سطر لكل اسم)</h3>
-        <textarea id="manualNames" rows="4" class="text-input" placeholder="وليد وادي العنزي&#10;أمجد النشمي الصلبي"></textarea>
-        <button class="btn btn-outline btn-block" id="btnManual" disabled>إضافة الأسماء اليدوية</button>
-        <div id="dropZone" class="drop-zone desktop-only">
-          <strong>أسقط الملفات هنا</strong>
-          <span class="muted">أفضل على سطح المكتب — على الجوال استخدم أزرار الرفع</span>
-        </div>
-      </details>
-
-      <div id="masterPreview" class="hidden master-preview">
-        <h3>فهرس الملف الرئيسي</h3>
-        <input type="search" id="masterFilter" class="text-input" placeholder="بحث في الفهرس…" />
-        <div id="masterCards" class="mobile-cards"></div>
-        <div class="table-wrap desktop-table">
-          <table>
-            <thead>
-              <tr>
-                <th>الاسم</th>
-                <th>الرتبة</th>
-                <th>الصفحات</th>
-                <th>عدد التواريخ</th>
-                <th>أحدث التواريخ</th>
-              </tr>
-            </thead>
-            <tbody id="masterBody"></tbody>
-          </table>
-        </div>
-      </div>
+      <p class="accuracy-note">لا يعتمد النظام تطابقًا غامضًا ولا تاريخًا مشكوكًا فيه تلقائيًا.</p>
     </section>
 
-    <!-- Step 2: Names -->
-    <section class="card hidden" id="panel-names">
-      <h2>مراجعة الأسماء</h2>
-      <p class="hint">لا تخمين عند الغموض — التطابق الخاطئ أخطر من عدم التطابق.</p>
-      <div id="namesList"></div>
-      <div class="btn-row sticky-actions">
-        <button class="btn btn-outline btn-block-sm" id="btnAutoConfirm">تأكيد حذر (عالي الثقة)</button>
-        <button class="btn btn-accent btn-block-sm" id="btnConfirmNames">اعتماد والانتقال للتواريخ</button>
-      </div>
-    </section>
-
-    <!-- Step 3: Dates -->
-    <section class="card hidden" id="panel-dates">
-      <h2>مراجعة التواريخ</h2>
-      <p class="hint">احذف الخاطئ أو أضف الناقص قبل الترتيب.</p>
-      <div id="datesList"></div>
-      <div class="btn-row sticky-actions">
-        <button class="btn btn-outline btn-block-sm" id="btnBulkSafe">اعتماد التواريخ الآمنة</button>
-        <button class="btn btn-accent btn-block-sm" id="btnRank">تنفيذ الترتيب</button>
-      </div>
-    </section>
-
-    <!-- Step 4: Results -->
-    <section class="card hidden" id="panel-results">
-      <h2>الترتيب</h2>
-      <div class="summary-grid" id="summaryGrid"></div>
-      <div id="rankChart" class="rank-chart hidden"></div>
-
-      <input type="search" id="resultsFilter" class="text-input" placeholder="تصفية بالاسم…" />
-
-      <!-- Mobile cards -->
-      <div id="resultsCards" class="mobile-cards results-cards"></div>
-
-      <!-- Desktop table -->
-      <div class="table-wrap desktop-table results-table">
-        <table>
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>الاسم</th>
-              <th>أحدث</th>
-              <th>السابق</th>
-              <th>العدد</th>
-              <th>الحالة</th>
-              <th>السبب</th>
-            </tr>
-          </thead>
-          <tbody id="resultsBody"></tbody>
-        </table>
-      </div>
-
-      <div class="export-row">
-        <a class="btn btn-primary" id="btnCopyText" href="#">نسخ للواتساب</a>
-        <a class="btn btn-outline" id="btnText" href="#">تنزيل نص</a>
-        <a class="btn btn-outline" id="btnExcel" href="#">Excel</a>
-        <a class="btn btn-outline" id="btnPdfFormal" href="#">PDF رسمي</a>
-      </div>
-
-      <details class="adv-block">
-        <summary>المزيد من التصدير والمقارنة</summary>
-        <div class="btn-row">
-          <a class="btn btn-outline" id="btnPdf" href="#">PDF عريض</a>
-          <a class="btn btn-outline" id="btnMasterXlsx" href="#">فهرس رئيسي</a>
-          <a class="btn btn-outline" id="btnAudit" href="#">تدقيق JSON</a>
-          <button class="btn btn-outline" type="button" id="btnRerank">إعادة الترتيب</button>
+    <section class="card hidden simple-results" id="panel-results" aria-labelledby="results-title">
+      <div class="results-heading-row">
+        <div>
+          <h2 id="results-title">نتيجة ترتيب أسماء القائمة الثانية</h2>
+          <p class="muted">النتيجة أدناه محصورة في الأسماء المستخرجة من الخيار رقم ٢ فقط.</p>
         </div>
-        <h3>مقارنة شخصين</h3>
-        <label class="muted">الاسم الأول
-          <input type="text" id="cmpA" class="text-input" placeholder="وليد وادي العنزي" />
-        </label>
-        <label class="muted">الاسم الثاني
-          <input type="text" id="cmpB" class="text-input" placeholder="أمجد النشمي الصلبي" />
-        </label>
-        <button class="btn btn-primary btn-block" id="btnCompare" type="button">قارن</button>
-        <div id="cmpOut" class="hint"></div>
-      </details>
+        <button class="btn btn-outline" id="btnReset" type="button">ترتيب جديد</button>
+      </div>
 
-      <h3>التفاصيل</h3>
-      <div id="detailBox" class="hint">اضغط «تفاصيل» على أي بطاقة/صف.</div>
+      <div class="summary-grid simple-summary" id="summaryGrid"></div>
+      <div id="resultNotice" class="hint result-notice"></div>
 
-      <h3>حالات معلّقة</h3>
-      <div id="issuesBox" class="hint"></div>
+      <div id="resultsCards" class="results-cards simple-result-list"></div>
+
+      <div class="export-row simple-exports" id="exportRow">
+        <a class="btn btn-primary" id="btnCopyText" href="#">نسخ النتيجة</a>
+        <a class="btn btn-outline" id="btnPdfFormal" href="#">تنزيل PDF</a>
+        <a class="btn btn-outline" id="btnExcel" href="#">تنزيل Excel</a>
+      </div>
     </section>
   </main>
 
-  <nav class="sticky-bar" aria-label="إجراءات سريعة">
-    <button class="btn btn-outline sticky-btn" type="button" id="btnReset">جديد</button>
-    <button class="btn btn-outline sticky-btn" type="button" id="btnTheme">ليلي</button>
-    <a class="btn btn-outline sticky-btn" href="#" id="btnPdfFormal2">PDF</a>
-    <button class="btn btn-outline sticky-btn" type="button" onclick="window.print()">طباعة</button>
-  </nav>
-
-  <footer class="footer">ترتيب أبو علياء — محرك حتمي · بلا اختلاق</footer>
+  <footer class="footer">ترتيب أبو علياء — ترتيب حتمي بلا تخمين</footer>
   <script src="/static/app.js"></script>
-  <script>
-    setInterval(() => {
-      const a = document.getElementById("btnPdfFormal");
-      const b = document.getElementById("btnPdfFormal2");
-      if (a && b && a.getAttribute("href") && a.getAttribute("href") !== "#") b.href = a.href;
-    }, 1000);
-  </script>
 </body>
 </html>
