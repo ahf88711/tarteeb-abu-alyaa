@@ -1,0 +1,63 @@
+name: Linux Docker OCR
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-docker-ocr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-and-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build tested production image
+        run: docker build --tag tarteeb-abu-alyaa:test .
+
+      - name: Start container
+        run: docker run --detach --name tarteeb-app --publish 8765:8765 --env PORT=8765 tarteeb-abu-alyaa:test
+
+      - name: Verify health and local OCR capability
+        run: |
+          python3 - <<'PY'
+          import json
+          import time
+          import urllib.request
+
+          health_url = "http://127.0.0.1:8765/api/health"
+          for attempt in range(40):
+              try:
+                  with urllib.request.urlopen(health_url, timeout=3) as response:
+                      health = json.load(response)
+                  if health.get("ok") is True:
+                      break
+              except Exception:
+                  if attempt == 39:
+                      raise
+                  time.sleep(1)
+          with urllib.request.urlopen(
+              "http://127.0.0.1:8765/api/capabilities", timeout=5
+          ) as response:
+              capabilities = json.load(response)
+          assert capabilities["arabic_ocr_available"] is True, capabilities
+          assert "tesseract" in capabilities["ocr_backends"], capabilities
+          print(json.dumps(capabilities, ensure_ascii=False, indent=2))
+          PY
+
+      - name: Show container logs
+        if: always()
+        run: docker logs tarteeb-app || true
+
+      - name: Stop container
+        if: always()
+        run: docker rm --force tarteeb-app || true
