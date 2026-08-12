@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -43,6 +44,28 @@ def test_index_arabic():
     assert r.status_code == 200
     assert "ترتيب أبو علياء" in r.text
     assert 'dir="rtl"' in r.text
+
+
+def test_index_has_only_two_image_or_pdf_upload_choices():
+    """The public UI exposes exactly the two lists requested by the operator."""
+    r = client.get("/")
+    assert r.status_code == 200
+    html = r.text
+    file_inputs = re.findall(r'<input\s+[^>]*type="file"[^>]*>', html, re.I | re.S)
+    assert len(file_inputs) == 2
+    assert "قائمة الأسماء والتواريخ" in html
+    assert "قائمة الأسماء المراد ترتيبهم فقط" in html
+    assert "نتيجة ترتيب أسماء القائمة الثانية" in html
+    for field in file_inputs:
+        assert ".pdf" in field
+        assert "image/*" in field
+        assert ".xlsx" not in field
+
+    # No folder, manual-name, search, or comparison fields remain in the UI.
+    assert 'type="text"' not in html
+    assert 'type="search"' not in html
+    assert "<textarea" not in html
+    assert "<select" not in html
 
 
 def test_capabilities():

@@ -64,6 +64,10 @@ def test_only_verified_targets_ranked_not_all_master():
     ranked = [r for r in s.ranking_results if r.get("rank") is not None]
     assert len(ranked) == 1
     assert ranked[0]["original_name"] == "أحمد علي"
+    target_ids = {target.id for target in s.target_names}
+    assert {result["id"] for result in s.ranking_results} == target_ids
+    assert "محمد سعيد" not in {result["original_name"] for result in s.ranking_results}
+    assert "خالد فهد" not in {result["original_name"] for result in s.ranking_results}
 
 
 def test_choose_candidate_unknown_not_verified():
