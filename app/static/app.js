@@ -31,7 +31,8 @@
       data = {};
     }
     if (!response.ok) {
-      const detail = data.detail || response.statusText || "حدث خطأ غير معروف.";
+      const detail =
+        data.detail || response.statusText || `فشل الطلب (HTTP ${response.status}).`;
       throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
     }
     return data;
