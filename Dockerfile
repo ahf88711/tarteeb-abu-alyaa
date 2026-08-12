@@ -38,7 +38,7 @@ COPY pytest.ini Makefile README.md ./
 FROM runtime-base AS test
 COPY tests ./tests
 RUN python3 scripts/verify_linux_runtime.py \
-    && RUN_REAL_OCR_TESTS=1 python3 -m pytest tests -q \
+    && RENDER=true RUN_REAL_OCR_TESTS=1 python3 -m pytest tests -q \
     && touch /tmp/tarteeb-tests-passed
 
 FROM runtime-base AS final
