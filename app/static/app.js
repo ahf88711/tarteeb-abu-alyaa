@@ -124,6 +124,42 @@
     return api(url, { method: "POST", body: formData });
   }
 
+  function pause(milliseconds) {
+    return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+  }
+
+  async function waitForPhase(expectedPhase, stageLabel) {
+    const startedAt = Date.now();
+    let transientFailures = 0;
+    while (Date.now() - startedAt < 60 * 60 * 1000) {
+      let progress;
+      try {
+        progress = await api(
+          `/api/session/${encodeURIComponent(sessionId)}/progress`
+        );
+        transientFailures = 0;
+      } catch (error) {
+        const message = error?.message || String(error);
+        if (!message.includes("Failed to fetch") || transientFailures >= 10) {
+          throw error;
+        }
+        transientFailures += 1;
+        setStatus(`${stageLabel} — الخادم مشغول بـ OCR؛ جارٍ استعادة الاتصال…`);
+        await pause(3000);
+        continue;
+      }
+      if (progress.phase === "error") {
+        throw new Error(progress.progress_message || "فشل OCR المحلي.");
+      }
+      if (progress.phase === expectedPhase) return progress;
+      const percent = Number(progress.progress_pct || 0);
+      const detail = progress.progress_message || "OCR المحلي يعمل بدقة…";
+      setStatus(`${stageLabel} — ${detail}${percent ? ` (${percent}٪)` : ""}`);
+      await pause(1800);
+    }
+    throw new Error("استغرق OCR وقتًا أطول من ساعة. جرّب تقسيم الملف إلى صفحات أقل.");
+  }
+
   async function runRanking() {
     const masterFiles = [...($("masterFile").files || [])];
     const targetFiles = [...($("targetFile").files || [])];
@@ -134,20 +170,28 @@
     sessionId = session.session_id;
 
     setStatus("١/٤ — جاري استخراج الأسماء والتواريخ من القائمة الأولى…");
-    const master = await uploadMany(
-      `/api/upload/master/multi?session_id=${encodeURIComponent(sessionId)}`,
+    await uploadMany(
+      `/api/upload/master/multi/start?session_id=${encodeURIComponent(sessionId)}`,
       "files",
       masterFiles
+    );
+    await waitForPhase("master_loaded", "١/٤");
+    const master = await api(
+      `/api/upload/master/result?session_id=${encodeURIComponent(sessionId)}`
     );
     if (!master.master_people_count) {
       throw new Error("لم يُستخرج أي اسم وتاريخ من القائمة الأولى. جرّب ملفًا أوضح.");
     }
 
     setStatus("٢/٤ — جاري استخراج الأسماء المطلوبة من القائمة الثانية…");
-    const targets = await uploadMany(
-      `/api/upload/targets/multi?session_id=${encodeURIComponent(sessionId)}`,
+    await uploadMany(
+      `/api/upload/targets/multi/start?session_id=${encodeURIComponent(sessionId)}`,
       "files",
       targetFiles
+    );
+    await waitForPhase("names_extracted", "٢/٤");
+    const targets = await api(
+      `/api/upload/targets/result?session_id=${encodeURIComponent(sessionId)}`
     );
     targetIds = new Set((targets.target_names || []).map((item) => item.id));
     if (!targetIds.size) {
