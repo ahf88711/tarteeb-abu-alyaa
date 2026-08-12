@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import sys
+import threading
+import time
 from pathlib import Path
 
+import httpx
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,7 +17,8 @@ sys.path.insert(0, str(ROOT))
 
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app.engine.pipeline import new_session
+from app.main import SESSIONS, app
 
 client = TestClient(app)
 
@@ -77,3 +82,47 @@ def test_capabilities():
     assert body["name"] == "ترتيب أبو علياء"
     assert "deterministic_ranking" in body["features"]
     assert "demo_full_rank" in body["features"]
+
+
+def test_health_stays_responsive_during_blocking_ocr_upload(monkeypatch):
+    """Long local OCR must run in FastAPI's worker pool, not its event loop."""
+    import app.main as main_module
+
+    session = new_session()
+    SESSIONS[session.session_id] = session
+    worker_started = threading.Event()
+
+    def slow_master_load(current_session, paths):
+        worker_started.set()
+        time.sleep(1.0)
+        current_session.phase = "master_loaded"
+        return current_session
+
+    monkeypatch.setattr(main_module, "load_master_many", slow_master_load)
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as async_client:
+            upload = asyncio.create_task(
+                async_client.post(
+                    "/api/upload/master/multi",
+                    params={"session_id": session.session_id},
+                    files={
+                        "files": (
+                            "master.xlsx",
+                            b"placeholder",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        )
+                    },
+                )
+            )
+            assert await asyncio.to_thread(worker_started.wait, 2.0)
+            health = await asyncio.wait_for(async_client.get("/api/health"), timeout=0.5)
+            assert health.status_code == 200
+            assert health.json()["ok"] is True
+            assert (await upload).status_code == 200
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        SESSIONS.pop(session.session_id, None)
