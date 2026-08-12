@@ -196,5 +196,32 @@ def test_master_date_confidence_rises_only_when_both_readings_match(monkeypatch)
         crop_path.unlink(missing_ok=True)
 
 
+def test_master_row_without_date_evidence_does_not_call_paid_verifier(monkeypatch):
+    crop_url, crop_path = _evidence_crop("hybrid_master_no_date.jpg")
+    row = {
+        "original_name": "محمد سعد الحارثي",
+        "notes": "حاضر",
+        "page": 1,
+        "row_index": 8,
+        "confidence": 0.60,
+        "name_confidence": 0.60,
+        "ocr_agreement": 1,
+        "row_association_confidence": 0.98,
+        "source_image": crop_url,
+        "source_bbox": {},
+    }
+    calls = []
+    monkeypatch.setattr(
+        extract_master,
+        "verify_arabic_rows",
+        lambda rows: calls.extend(rows) or HybridVerificationReport(),
+    )
+    try:
+        extract_master.apply_hybrid_master_verification([row])
+        assert calls == []
+    finally:
+        crop_path.unlink(missing_ok=True)
+
+
 def test_evidence_path_resolution_rejects_traversal():
     assert evidence_url_to_path("/api/evidence/../secret.jpg") is None

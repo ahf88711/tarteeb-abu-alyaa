@@ -460,6 +460,23 @@ def apply_hybrid_master_verification(rows: list[dict]) -> None:
                 ),
             )
         )
+        # Master rows without date evidence do not affect historical ranking.
+        # Restrict paid verification to uncertain date-bearing rows (or rows
+        # whose notes contain a likely OCR-damaged year/date observation).
+        notes = str(row.get("notes") or "")
+        possible_missed_date = bool(
+            not local_dates and re.search(r"[٠-٩0-9]{3,5}\s*[/\-.]", notes)
+        )
+        uncertain_date = bool(
+            local_dates
+            and (
+                float(row.get("confidence") or 0.0) < 0.93
+                or int(row.get("ocr_agreement") or 0) < 2
+                or float(row.get("row_association_confidence") or 0.0) < 0.95
+            )
+        )
+        if not uncertain_date and not possible_missed_date:
+            continue
         row_id = f"m{row.get('page', 0)}r{row.get('row_index', 0)}"
         inputs.append(
             HybridRowInput(

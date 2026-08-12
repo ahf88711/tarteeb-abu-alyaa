@@ -159,7 +159,12 @@ def load_targets(session: SessionState, path: Path, *, replace: bool = True) -> 
         added = len(targets)
     else:
         added = _append_targets(session, targets)
-    session.phase = "names_extracted"
+    set_progress(
+        session,
+        "names_extracted",
+        f"اكتمل استخراج القائمة المطلوبة: {len(session.target_names)} اسمًا.",
+        100,
+    )
     session.messages.append(f"أُضيف/حُدّث {added} اسمًا من {path.name}.")
     _summarize_targets(session)
     return session

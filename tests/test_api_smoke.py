@@ -138,3 +138,21 @@ def test_health_stays_responsive_during_blocking_ocr_upload(monkeypatch):
         asyncio.run(scenario())
     finally:
         SESSIONS.pop(session.session_id, None)
+
+
+def test_target_completion_reports_one_hundred_percent(monkeypatch, tmp_path):
+    import app.engine.pipeline as pipeline_module
+
+    session = new_session()
+    master_key = "محمد سعد الحارثي"
+    from app.engine.models import MasterPerson, make_master_key
+
+    key = make_master_key(master_key)
+    session.master_people[key] = MasterPerson(master_key, key)
+    target_file = tmp_path / "targets.jpg"
+    target_file.write_bytes(b"placeholder")
+    monkeypatch.setattr(pipeline_module, "extract_target_names", lambda path, master: [])
+
+    pipeline_module.load_targets(session, target_file)
+    assert session.phase == "names_extracted"
+    assert session.summary["progress_pct"] == 100
