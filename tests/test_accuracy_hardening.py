@@ -16,7 +16,12 @@ from app.engine.extract_master import (
 )
 from app.engine.extract_targets import match_to_master
 from app.engine.models import MasterPerson, NameStatus, make_master_key
-from app.engine.ocr import OcrToken, highlight_score, merge_ocr_observations
+from app.engine.ocr import (
+    OcrToken,
+    highlight_score,
+    merge_ocr_observations,
+    orient_document_image,
+)
 from app.engine.ranking import RankPerson, RankStatus, compare_two, rank_people
 from app.engine.pipeline import new_session, run_ranking
 from app.engine.models import TargetName
@@ -302,6 +307,27 @@ def test_highlight_detection_selects_yellow_region(tmp_path: Path):
     plain = OcrToken("اسم عادي", 0.10, 1 - (250 / 300), 0.30, 40 / 300)
     assert highlight_score(path, highlighted) > 0.20
     assert highlight_score(path, plain) < 0.02
+
+
+def test_document_orientation_applies_clockwise_osd_correction(
+    tmp_path: Path, monkeypatch
+):
+    source = tmp_path / "sideways.png"
+    image = Image.new("RGB", (120, 60), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, 59, 59), fill="red")
+    draw.rectangle((60, 0, 119, 59), fill="blue")
+    image.save(source)
+
+    monkeypatch.setattr("app.engine.ocr._tesseract_osd_rotation", lambda _: 90)
+    oriented = orient_document_image(source)
+    try:
+        with Image.open(oriented) as result:
+            assert result.size == (60, 120)
+            assert result.getpixel((30, 20))[0] > 200
+            assert result.getpixel((30, 100))[2] > 200
+    finally:
+        oriented.unlink(missing_ok=True)
 
 
 def test_table_grid_detection_on_synthetic_roster(tmp_path: Path):

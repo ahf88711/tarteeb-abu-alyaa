@@ -17,6 +17,7 @@ from .ocr import (
     highlight_score,
     load_image_any,
     ocr_consensus,
+    orient_document_image,
     save_region_crop,
 )
 
@@ -220,59 +221,71 @@ def _extract_page(
     *,
     page_number: int,
 ) -> list[TargetName]:
-    tokens = ocr_consensus(path)
-    highlighted = [(token, highlight_score(path, token)) for token in tokens]
-    highlighted_tokens = [token for token, score in highlighted if score >= 0.035]
-    selection_mode = "highlighted" if highlighted_tokens else "all_names"
-    source_tokens = highlighted_tokens or tokens
-    raw_names = extract_name_tokens(source_tokens)
+    oriented_path = orient_document_image(path)
+    remove_oriented = oriented_path != path
+    try:
+        tokens = ocr_consensus(oriented_path)
+        highlighted = [
+            (token, highlight_score(oriented_path, token)) for token in tokens
+        ]
+        highlighted_tokens = [token for token, score in highlighted if score >= 0.035]
+        selection_mode = "highlighted" if highlighted_tokens else "all_names"
+        source_tokens = highlighted_tokens or tokens
+        raw_names = extract_name_tokens(source_tokens)
 
-    results: list[TargetName] = []
-    for text, token in raw_names:
-        key = make_master_key(text)
-        status, match_conf, candidates, matched = match_to_master(text, master)
-        visual_conf = max(0.0, min(1.0, token.confidence))
-        identity_conf = 0.58 * visual_conf + 0.42 * match_conf
-        if status == NameStatus.VERIFIED and (
-            visual_conf < 0.82 or token.agreement < 2
-        ):
-            status = NameStatus.NEEDS_REVIEW
-        crop_path = save_region_crop(
-            path,
-            x=token.x,
-            top=token.cy - token.h / 2,
-            w=token.w,
-            h=token.h,
-            prefix=f"target_p{page_number}",
-            padding=0.012,
-        )
-        score = highlight_score(path, token) if selection_mode == "highlighted" else 0.0
-        results.append(
-            TargetName(
-                id=str(uuid.uuid4())[:8],
-                original_name=text,
-                normalized_name=key,
-                ocr_raw=token.text,
-                confidence=round(identity_conf, 4),
-                status=status,
-                crop_path=crop_path,
-                candidates=candidates,
-                matched_master_name=matched,
-                bbox={
-                    "x": token.x,
-                    "y": token.y,
-                    "w": token.w,
-                    "h": token.h,
-                    "page": page_number,
-                    "visual_confidence": round(visual_conf, 4),
-                    "ocr_agreement": token.agreement,
-                    "ocr_alternatives": token.alternatives,
-                    "selection_mode": selection_mode,
-                    "highlight_score": round(score, 4),
-                },
+        results: list[TargetName] = []
+        for text, token in raw_names:
+            key = make_master_key(text)
+            status, match_conf, candidates, matched = match_to_master(text, master)
+            visual_conf = max(0.0, min(1.0, token.confidence))
+            identity_conf = 0.58 * visual_conf + 0.42 * match_conf
+            if status == NameStatus.VERIFIED and (
+                visual_conf < 0.82 or token.agreement < 2
+            ):
+                status = NameStatus.NEEDS_REVIEW
+            crop_path = save_region_crop(
+                oriented_path,
+                x=token.x,
+                top=token.cy - token.h / 2,
+                w=token.w,
+                h=token.h,
+                prefix=f"target_p{page_number}",
+                padding=0.012,
             )
-        )
-    return results
+            score = (
+                highlight_score(oriented_path, token)
+                if selection_mode == "highlighted"
+                else 0.0
+            )
+            results.append(
+                TargetName(
+                    id=str(uuid.uuid4())[:8],
+                    original_name=text,
+                    normalized_name=key,
+                    ocr_raw=token.text,
+                    confidence=round(identity_conf, 4),
+                    status=status,
+                    crop_path=crop_path,
+                    candidates=candidates,
+                    matched_master_name=matched,
+                    bbox={
+                        "x": token.x,
+                        "y": token.y,
+                        "w": token.w,
+                        "h": token.h,
+                        "page": page_number,
+                        "visual_confidence": round(visual_conf, 4),
+                        "ocr_agreement": token.agreement,
+                        "ocr_alternatives": token.alternatives,
+                        "selection_mode": selection_mode,
+                        "highlight_score": round(score, 4),
+                    },
+                )
+            )
+        return results
+    finally:
+        if remove_oriented:
+            oriented_path.unlink(missing_ok=True)
 
 
 def extract_target_names(
@@ -285,7 +298,10 @@ def extract_target_names(
         pages = _render_target_pdf(path)
         temporary.extend(pages)
     else:
-        pages = [load_image_any(path)]
+        loaded = load_image_any(path)
+        pages = [loaded]
+        if loaded != path:
+            temporary.append(loaded)
 
     results: list[TargetName] = []
     try:

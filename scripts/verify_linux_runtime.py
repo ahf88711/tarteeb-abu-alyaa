@@ -47,7 +47,11 @@ def main() -> None:
     register_heif_opener()
 
     from app.engine.export import _arabic_fonts
-    from app.engine.ocr import available_ocr_backends, ocr_consensus
+    from app.engine.ocr import (
+        available_ocr_backends,
+        ocr_consensus,
+        orient_document_image,
+    )
 
     backends = available_ocr_backends()
     if "tesseract" not in backends:
@@ -62,14 +66,22 @@ def main() -> None:
     sample = ROOT / "data" / "samples" / "target_names_preview.jpg"
     if not sample.is_file():
         raise SystemExit(f"OCR verification sample is missing: {sample}")
-    tokens = ocr_consensus(sample, presets=("raw", "enhanced"))
-    combined = " ".join(token.text for token in tokens)
-    arabic_count = len(re.findall(r"[\u0600-\u06ff]", combined))
-    if len(tokens) < 5 or arabic_count < 10:
-        raise SystemExit(
-            "Arabic OCR produced insufficient output "
-            f"(tokens={len(tokens)}, arabic_chars={arabic_count})."
-        )
+    oriented = orient_document_image(sample)
+    try:
+        with Image.open(oriented) as upright:
+            if upright.height <= upright.width:
+                raise SystemExit(f"Document orientation was not corrected: {upright.size}")
+        tokens = ocr_consensus(oriented, presets=("raw", "enhanced"))
+        combined = " ".join(token.text for token in tokens)
+        arabic_count = len(re.findall(r"[\u0600-\u06ff]", combined))
+        if len(tokens) < 20 or arabic_count < 50:
+            raise SystemExit(
+                "Arabic OCR produced insufficient upright output "
+                f"(tokens={len(tokens)}, arabic_chars={arabic_count})."
+            )
+    finally:
+        if oriented != sample:
+            oriented.unlink(missing_ok=True)
 
     print(
         json.dumps(

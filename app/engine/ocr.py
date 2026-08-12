@@ -143,6 +143,51 @@ def load_image_any(path: Path) -> Path:
     raise RuntimeError(f"صيغة صورة غير مدعومة: {suffix}")
 
 
+def _tesseract_osd_rotation(path: Path) -> Optional[int]:
+    """Return the clockwise correction requested by Tesseract OSD."""
+    exe = shutil.which("tesseract")
+    if not exe:
+        return None
+    try:
+        proc = subprocess.run(
+            [exe, str(path), "stdout", "--psm", "0", "-l", "osd"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except Exception:
+        return None
+    output = f"{proc.stdout}\n{proc.stderr}"
+    match = re.search(r"Rotate:\s*(0|90|180|270)\b", output)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def orient_document_image(path: Path) -> Path:
+    """Return an upright raster for OCR, preserving highlight coordinates.
+
+    EXIF is applied first. For landscape phone photos, Tesseract OSD chooses
+    the clockwise correction; a clockwise 90-degree fallback covers scanners
+    that strip orientation metadata and OSD confidence. The returned temporary
+    image is then used consistently for OCR, highlight scoring, and crops.
+    """
+    image_path = load_image_any(path)
+    with Image.open(image_path) as source:
+        image = ImageOps.exif_transpose(source.convert("RGB"))
+        rotation = _tesseract_osd_rotation(image_path)
+        if rotation is None:
+            rotation = 90 if image.width > image.height * 1.08 else 0
+        if rotation == 0:
+            return image_path
+        destination = Path(tempfile.mkstemp(prefix="oriented_", suffix=".png")[1])
+        # PIL positive angles are counter-clockwise; OSD Rotate is clockwise.
+        image.rotate(-rotation, expand=True, resample=Image.Resampling.BICUBIC).save(
+            destination, "PNG"
+        )
+    return destination
+
+
 def _resize_for_ocr(image: Image.Image, max_side: int = 3600) -> Image.Image:
     image = ImageOps.exif_transpose(image)
     width, height = image.size
