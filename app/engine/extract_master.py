@@ -132,6 +132,57 @@ def _cluster_axis(
     return [float(np.mean(cluster)) / size for cluster in clusters]
 
 
+def _select_roster_columns(
+    vertical_lines: list[float],
+) -> Optional[tuple[float, float, float]]:
+    """Select notes/rank/name rules without trusting simple rightmost order.
+
+    Arabic roster scans often align the right edge of every printed name. That
+    repeated ink can look like a vertical rule in a projection profile. A
+    valid layout must instead form plausible sequence, name, and rank column
+    widths. Evaluating all right-side rule combinations removes those false
+    text-alignment lines while preserving tables that include an attendance
+    column to the left of rank.
+    """
+    if len(vertical_lines) < 5:
+        return None
+    lines = sorted(vertical_lines)
+    left_border = lines[0]
+    candidates: list[tuple[float, float, float, float]] = []
+    for right_index in range(len(lines) - 1, 3, -1):
+        right = lines[right_index]
+        if right < 0.90:
+            continue
+        for name_right_index in range(2, right_index):
+            name_right = lines[name_right_index]
+            sequence_width = right - name_right
+            if not 0.025 <= sequence_width <= 0.115:
+                continue
+            for name_left_index in range(1, name_right_index):
+                name_left = lines[name_left_index]
+                name_width = name_right - name_left
+                if not 0.10 <= name_width <= 0.32:
+                    continue
+                for notes_index in range(name_left_index):
+                    notes_right = lines[notes_index]
+                    rank_width = name_left - notes_right
+                    if not 0.025 <= rank_width <= 0.14:
+                        continue
+                    if notes_right - left_border < 0.30:
+                        continue
+                    score = (
+                        abs(sequence_width - 0.055)
+                        + 0.70 * abs(name_width - 0.17)
+                        + 0.80 * abs(rank_width - 0.065)
+                        + 0.20 * abs(right - lines[-1])
+                    )
+                    candidates.append((score, notes_right, name_left, name_right))
+    if not candidates:
+        return None
+    _, notes_right, name_left, name_right = min(candidates)
+    return notes_right, name_left, name_right
+
+
 def detect_table_grid(image_path: Path) -> Optional[TableGrid]:
     """Detect table rules using projection profiles; fail closed if uncertain."""
     with Image.open(image_path) as source:
@@ -177,13 +228,13 @@ def detect_table_grid(image_path: Path) -> Optional[TableGrid]:
     vertical = [value for value in vertical if 0.002 <= value <= 0.998]
     if len(vertical) < 5:
         return None
-    # The common Arabic roster structure is notes | rank | name | sequence.
-    # Use only detected rules; never infer a name column from OCR text proximity.
-    notes_right = vertical[-4]
-    name_left = vertical[-3]
-    name_right = vertical[-2]
-    if not (0.04 <= name_right - name_left <= 0.36):
+    # The common Arabic roster structure ends with rank | name | sequence.
+    # Select by plausible column geometry because aligned name text can create
+    # a stronger projection than a faint/slanted table rule.
+    columns = _select_roster_columns(vertical)
+    if columns is None:
         return None
+    notes_right, name_left, name_right = columns
     return TableGrid(
         row_boundaries=tuple(horizontal),
         vertical_lines=tuple(vertical),

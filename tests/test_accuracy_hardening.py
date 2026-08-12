@@ -9,7 +9,11 @@ import random
 from PIL import Image, ImageDraw
 
 from app.engine.dates import ExtractedDate, HijriDate, extract_all_dates
-from app.engine.extract_master import _merge_near_duplicate_people, detect_table_grid
+from app.engine.extract_master import (
+    _merge_near_duplicate_people,
+    _select_roster_columns,
+    detect_table_grid,
+)
 from app.engine.extract_targets import match_to_master
 from app.engine.models import MasterPerson, NameStatus, make_master_key
 from app.engine.ocr import OcrToken, highlight_score, merge_ocr_observations
@@ -315,3 +319,16 @@ def test_table_grid_detection_on_synthetic_roster(tmp_path: Path):
     assert grid is not None
     assert len(grid.vertical_lines) >= 5
     assert len(grid.row_boundaries) >= 5
+
+
+def test_roster_column_selection_rejects_aligned_name_ink_as_rule():
+    # 0.857 is a false projection caused by repeated right-aligned name text.
+    # The actual name cell spans 0.770..0.926.
+    selected = _select_roster_columns(
+        [0.044, 0.717, 0.770, 0.857, 0.926, 0.985]
+    )
+    assert selected is not None
+    notes_right, name_left, name_right = selected
+    assert notes_right == 0.717
+    assert name_left == 0.770
+    assert name_right == 0.926
