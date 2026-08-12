@@ -7,8 +7,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, List, Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -153,6 +153,34 @@ def _people_payload(s) -> list[dict]:
     ]
 
 
+def _set_background_error(s, message: str, exc: Exception) -> None:
+    """Expose a useful Arabic failure through the existing progress endpoint."""
+    detail = f"{message}: {exc}"
+    s.phase = "error"
+    s.messages.append(detail)
+    s.summary = {
+        **s.summary,
+        "progress_pct": 0,
+        "progress_message": detail,
+    }
+
+
+def _run_master_upload_job(s, paths: list[Path]) -> None:
+    try:
+        load_master_many(s, paths)
+    except Exception as exc:
+        _set_background_error(s, "فشل استخراج القائمة الأولى", exc)
+
+
+def _run_targets_upload_job(s, paths: list[Path]) -> None:
+    try:
+        from app.engine.pipeline import load_targets_many
+
+        load_targets_many(s, paths)
+    except Exception as exc:
+        _set_background_error(s, "فشل استخراج القائمة الثانية", exc)
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     return HTMLResponse((STATIC / "index.html").read_text(encoding="utf-8"))
@@ -242,6 +270,119 @@ def progress(session_id: str):
         "messages": s.messages[-10:],
         "master_people_count": len(s.master_people),
         "target_count": len(s.target_names),
+    }
+
+
+@app.post("/api/upload/master/multi/start", status_code=202)
+def start_master_upload(
+    background_tasks: BackgroundTasks,
+    session_id: str,
+    files: List[UploadFile] = File(...),
+):
+    """Accept master files quickly, then run long local OCR outside the request."""
+    s = _session(session_id)
+    paths: list[Path] = []
+    for index, file in enumerate(files):
+        if not file.filename:
+            continue
+        suffix = Path(file.filename).suffix.lower()
+        if suffix not in {
+            ".pdf", ".xlsx", ".xlsm", ".png", ".jpg", ".jpeg", ".heic", ".heif"
+        }:
+            continue
+        destination = UPLOAD_ROOT / f"{session_id}_master_async_{index}{suffix}"
+        with destination.open("wb") as output:
+            shutil.copyfileobj(file.file, output)
+        if suffix in {".png", ".jpg", ".jpeg", ".heic", ".heif"}:
+            try:
+                destination = _image_to_pdf(destination, session_id, index)
+            except Exception as exc:
+                raise HTTPException(500, detail=f"فشل تحويل صورة إلى PDF: {exc}") from exc
+        paths.append(destination)
+    if not paths:
+        raise HTTPException(400, detail="لا ملفات PDF/صور صالحة في القائمة الأولى.")
+
+    s.phase = "master_queued"
+    s.summary = {
+        **s.summary,
+        "progress_pct": 1,
+        "progress_message": "تم استلام القائمة الأولى وبدأ OCR المحلي.",
+    }
+    background_tasks.add_task(_run_master_upload_job, s, paths)
+    return {"session_id": session_id, "phase": s.phase, "files": len(paths)}
+
+
+@app.get("/api/upload/master/result")
+def master_upload_result(session_id: str):
+    s = _session(session_id)
+    if s.phase == "error":
+        raise HTTPException(500, detail=s.summary.get("progress_message", "فشل OCR."))
+    if s.phase != "master_loaded":
+        return JSONResponse(
+            {"session_id": session_id, "phase": s.phase, "ready": False},
+            status_code=202,
+        )
+    return {
+        "session_id": session_id,
+        "phase": s.phase,
+        "ready": True,
+        "master_people_count": len(s.master_people),
+        "people": _people_payload(s),
+        "messages": s.messages[-5:],
+    }
+
+
+@app.post("/api/upload/targets/multi/start", status_code=202)
+def start_targets_upload(
+    background_tasks: BackgroundTasks,
+    session_id: str,
+    files: List[UploadFile] = File(...),
+):
+    """Accept target files quickly and keep their local OCR independently pollable."""
+    s = _session(session_id)
+    paths: list[Path] = []
+    for index, file in enumerate(files):
+        if not file.filename:
+            continue
+        suffix = Path(file.filename).suffix.lower()
+        if suffix not in {
+            ".pdf", ".xlsx", ".xlsm", ".png", ".jpg", ".jpeg", ".heic", ".heif"
+        }:
+            continue
+        destination = UPLOAD_ROOT / f"{session_id}_targets_async_{index}{suffix}"
+        with destination.open("wb") as output:
+            shutil.copyfileobj(file.file, output)
+        paths.append(destination)
+    if not paths:
+        raise HTTPException(400, detail="لا ملفات PDF/صور صالحة في القائمة الثانية.")
+
+    s.phase = "targets_queued"
+    s.summary = {
+        **s.summary,
+        "progress_pct": 1,
+        "progress_message": "تم استلام القائمة الثانية وبدأ OCR المحلي.",
+    }
+    background_tasks.add_task(_run_targets_upload_job, s, paths)
+    return {"session_id": session_id, "phase": s.phase, "files": len(paths)}
+
+
+@app.get("/api/upload/targets/result")
+def targets_upload_result(session_id: str):
+    s = _session(session_id)
+    if s.phase == "error":
+        raise HTTPException(500, detail=s.summary.get("progress_message", "فشل OCR."))
+    if s.phase != "names_extracted":
+        return JSONResponse(
+            {"session_id": session_id, "phase": s.phase, "ready": False},
+            status_code=202,
+        )
+    return {
+        "session_id": session_id,
+        "phase": s.phase,
+        "ready": True,
+        "target_names": [target.to_dict() for target in s.target_names],
+        "summary": s.summary,
+        "messages": s.messages[-8:],
     }
 
 
